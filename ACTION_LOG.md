@@ -22,6 +22,7 @@ Each entry records date, action, result, and next step. Changes should be made i
 - Reviewed the launched Fabric instance: `rustcraft_trigger 0.1.0` loaded successfully with no errors. No Rustcraft runtime log existed because the listener was not running. Added mod-side structured logs for initialization, queued triggers, in-flight suppression, responses, and unavailable-listener warnings; rebuilt and refreshed the local jar. User trigger testing is now required.
 - Reproduced the reported launch issue: a Windows argument-list invocation truncated the config path at `C:\Users\Triss\Desktop\Rust`, causing `config_read_failed`. Verified environment-based startup, listener bind, and an authorized trigger returning `OK`. Added `start-rustcraft-listener.cmd` for quoting-safe Windows startup.
 - Reviewed the next in-game J press: the Fabric initialization log was present, but no `Trigger queued` event appeared, so the key event was not reaching the queued-input path. Added a direct key-state edge detector while retaining queue draining, rebuilt the Fabric mod, and refreshed the local Prism instance jar. Next: restart the Minecraft instance and press J once for verification.
+- Verified the final in-game test: after assigning `Rustcraft: Launch` from its default `Home` binding to `J`, the Fabric log recorded `Trigger queued` and `Rustcraft trigger response: OK` twice, while Rustcraft recorded authorized triggers with `trigger_launch result=OK`. Conclusion: the integration is functioning; document keybind assignment as part of setup.
 
 ## Rough timeline
 
