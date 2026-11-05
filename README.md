@@ -11,6 +11,10 @@ Rustcraft is a small Rust utility that starts a user-configured Minecraft Java c
 
 Use `RUSTCRAFT_CONFIG` or `--config path/to/file` for a configuration outside the repository. The example uses `java -version` as a harmless smoke test; replace it with your own, already-authorized game command.
 
+## Fabric trigger mode
+
+The `fabric-trigger-mod` source scaffold lets a client-only Fabric mod trigger Rustcraft over loopback. Start Rustcraft with `--listen --config rustcraft.conf`, install the built mod in the Fabric instance, and press `J` in-game. The listener binds only to `127.0.0.1:39281` and requires a local token. It never handles Minecraft credentials.
+
 ## Scope and provenance
 
 This project is a clean-room implementation. Horizon was inspected only for publicly documented behavior, repository structure, and license obligations. No Horizon source is included in this baseline. Horizon is MIT-licensed; if compatible code is later reused, its copyright and license notice will be retained in `THIRD_PARTY_NOTICES.md` and the exact source will be recorded in the decision log.

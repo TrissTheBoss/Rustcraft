@@ -1,5 +1,7 @@
 use std::{
-    env, fs, io,
+    env, fs,
+    io::{self, BufRead, BufReader, Write},
+    net::TcpListener,
     path::PathBuf,
     process::{Command, ExitCode},
 };
@@ -72,12 +74,15 @@ fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
     let mut config = path.clone();
+    let mut listen = false;
     let mut args = env::args().skip(1);
     while let Some(arg) = args.next() {
         if arg == "--config" {
             if let Some(value) = args.next() {
                 config = PathBuf::from(value);
             }
+        } else if arg == "--listen" {
+            listen = true;
         }
     }
     let (executable, game_args) = match read_command(&config) {
@@ -87,6 +92,9 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    if listen {
+        return listen_for_trigger(&executable, &game_args);
+    }
     println!("Starting Minecraft command: {executable}");
     match Command::new(&executable).args(game_args).status() {
         Ok(status) => ExitCode::from(status.code().unwrap_or(1) as u8),
@@ -95,4 +103,36 @@ fn main() -> ExitCode {
             ExitCode::from(3)
         }
     }
+}
+
+fn listen_for_trigger(executable: &str, game_args: &[String]) -> ExitCode {
+    let listener = match TcpListener::bind(("127.0.0.1", 39281)) {
+        Ok(listener) => listener,
+        Err(error) => {
+            eprintln!("Rustcraft: cannot listen on 127.0.0.1:39281: {error}");
+            return ExitCode::from(4);
+        }
+    };
+    let token = env::var("RUSTCRAFT_TRIGGER_TOKEN").unwrap_or_else(|_| "local-only".to_owned());
+    println!("Rustcraft trigger listening on 127.0.0.1:39281");
+    for stream in listener.incoming() {
+        let mut stream = match stream {
+            Ok(stream) => stream,
+            Err(error) => {
+                eprintln!("Rustcraft: trigger connection failed: {error}");
+                continue;
+            }
+        };
+        let mut line = String::new();
+        if BufReader::new(&mut stream).read_line(&mut line).is_ok()
+            && line.trim() == format!("RUSTCRAFT {token}")
+        {
+            let result = Command::new(executable).args(game_args).spawn();
+            let response = if result.is_ok() { "OK\n" } else { "ERROR\n" };
+            let _ = stream.write_all(response.as_bytes());
+        } else {
+            let _ = stream.write_all(b"DENIED\n");
+        }
+    }
+    ExitCode::SUCCESS
 }
