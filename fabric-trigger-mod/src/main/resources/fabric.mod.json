@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "id": "rustcraft_trigger",
-  "version": "0.1.0",
+  "version": "${version}",
   "name": "Rustcraft Trigger",
   "description": "Triggers a local Rustcraft launch command from inside Minecraft.",
   "environment": "client",
