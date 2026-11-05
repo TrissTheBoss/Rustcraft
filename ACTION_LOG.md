@@ -12,6 +12,7 @@ Each entry records date, action, result, and next step. Changes should be made i
 - Started Visual Studio 2022 Build Tools with the C++ workload through winget. The installer was still active during this session, so `cargo test` remains pending until `link.exe` is available.
 - Verified the installation completed: MSVC `link.exe` is available from Visual Studio 2022 Build Tools. `cargo fmt --check`, `cargo test`, and `cargo run -- --help` all pass. Tagged this verified state as `v0.1.1`.
 - Ran the release binary with `rustcraft.conf.example`; it launched Java 21 successfully. Fixed argument quote handling discovered during that run, then reran `cargo fmt --check`, `cargo test`, and the release smoke test successfully. Tagged `v0.1.2`.
+- Located the Prism instance `Rustcraft testing` in the `Rustcraft` group. Added quote-aware argument parsing, then launched Prism through Rustcraft with `--launch "Rustcraft testing"`; Prism accepted the exact instance ID and prepared Minecraft 26.3. No Java process remained at the follow-up check, indicating an instance-side startup/authentication exit rather than a Rustcraft handoff failure. Tagged `v0.1.3`.
 
 ## Rough timeline
 

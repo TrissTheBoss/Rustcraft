@@ -25,12 +25,7 @@ fn read_command(path: &PathBuf) -> io::Result<(String, Vec<String>)> {
         if let Some(value) = line.strip_prefix("executable=") {
             executable = Some(value.trim().trim_matches('"').to_owned());
         } else if let Some(value) = line.strip_prefix("args=") {
-            args = value
-                .trim()
-                .trim_matches('"')
-                .split_whitespace()
-                .map(str::to_owned)
-                .collect();
+            args = split_args(value.trim())?;
         } else {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -41,6 +36,33 @@ fn read_command(path: &PathBuf) -> io::Result<(String, Vec<String>)> {
     executable
         .map(|exe| (exe, args))
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing executable= in config"))
+}
+
+fn split_args(value: &str) -> io::Result<Vec<String>> {
+    let mut result = Vec::new();
+    let mut current = String::new();
+    let mut quoted = false;
+    for character in value.chars() {
+        match character {
+            '"' => quoted = !quoted,
+            character if character.is_whitespace() && !quoted => {
+                if !current.is_empty() {
+                    result.push(std::mem::take(&mut current));
+                }
+            }
+            character => current.push(character),
+        }
+    }
+    if quoted {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "unterminated quote in args",
+        ));
+    }
+    if !current.is_empty() {
+        result.push(current);
+    }
+    Ok(result)
 }
 
 fn main() -> ExitCode {
