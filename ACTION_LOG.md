@@ -14,6 +14,7 @@ Each entry records date, action, result, and next step. Changes should be made i
 - Ran the release binary with `rustcraft.conf.example`; it launched Java 21 successfully. Fixed argument quote handling discovered during that run, then reran `cargo fmt --check`, `cargo test`, and the release smoke test successfully. Tagged `v0.1.2`.
 - Located the Prism instance `Rustcraft testing` in the `Rustcraft` group. Added quote-aware argument parsing, then launched Prism through Rustcraft with `--launch "Rustcraft testing"`; Prism accepted the exact instance ID and prepared Minecraft 26.3. No Java process remained at the follow-up check, indicating an instance-side startup/authentication exit rather than a Rustcraft handoff failure. Tagged `v0.1.3`.
 - Added the loopback trigger protocol and a Fabric client-mod source scaffold for Minecraft 26.3 / Fabric Loader 0.20.1. Rustcraft now supports `--listen`; the mod sends a tokenized trigger from key `J`. Rust tests pass. Fabric API dependency/build packaging remains the next step because the converted instance does not yet expose a selected Fabric API version.
+- Selected official Fabric API `0.162.0+26.3` and added a clean Gradle/Loom project configuration. Gradle 9.8.2 is installed. The current 26.3 non-obfuscated dependency resolution still needs the official template coordinates; no unverified jar was installed.
 
 ## Rough timeline
 
