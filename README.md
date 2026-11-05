@@ -13,7 +13,7 @@ Use `RUSTCRAFT_CONFIG` or `--config path/to/file` for a configuration outside th
 
 ## Fabric trigger mode
 
-The `fabric-trigger-mod` source scaffold lets a client-only Fabric mod trigger Rustcraft over loopback. Start Rustcraft with `--listen --config rustcraft.conf`, or run `start-rustcraft-listener.cmd` on Windows. Install the built mod in the Fabric instance and press `J` in-game. The listener binds only to `127.0.0.1:39281` and requires a local token. It never handles Minecraft credentials.
+The `fabric-trigger-mod` source scaffold lets a client-only Fabric mod trigger Rustcraft over loopback. Start Rustcraft with `--listen --config rustcraft.conf`, or run `start-rustcraft-listener.cmd` on Windows. Install the built mod in the Fabric instance, then open Minecraft Controls and assign `Rustcraft: Launch` to `J` (the default Minecraft binding may be `Home`) before pressing it in-game. The listener binds only to `127.0.0.1:39281` and requires a local token. It never handles Minecraft credentials.
 
 ## Scope and provenance
 

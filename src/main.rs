@@ -205,6 +205,8 @@ fn listen_for_trigger(logger: &mut Logger, executable: &str, game_args: &[String
                 continue;
             }
         };
+        let _ = stream.set_nodelay(true);
+        let _ = stream.set_write_timeout(Some(std::time::Duration::from_millis(500)));
         let mut line = String::new();
         if BufReader::new(&mut stream).read_line(&mut line).is_ok()
             && line.trim() == format!("RUSTCRAFT {token}")
@@ -220,4 +222,31 @@ fn listen_for_trigger(logger: &mut Logger, executable: &str, game_args: &[String
         }
     }
     ExitCode::SUCCESS
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn split_args_preserves_quoted_instance_id() {
+        assert_eq!(
+            split_args(r#"--launch "Rustcraft testing" --profile test"#).unwrap(),
+            vec!["--launch", "Rustcraft testing", "--profile", "test"]
+        );
+    }
+
+    #[test]
+    fn split_args_rejects_unterminated_quotes() {
+        assert!(split_args(r#"--launch "Rustcraft testing"#).is_err());
+    }
+
+    #[test]
+    fn read_command_rejects_unknown_settings() {
+        let path = std::env::temp_dir().join(format!("rustcraft-test-{}", std::process::id()));
+        fs::write(&path, "executable=java\nunknown=value\n").unwrap();
+        let result = read_command(&path);
+        let _ = fs::remove_file(&path);
+        assert!(result.is_err());
+    }
 }
