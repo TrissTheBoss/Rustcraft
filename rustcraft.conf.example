@@ -1,0 +1,4 @@
+# Point this at an installation you own and have configured yourself.
+# Do not put passwords, access tokens, or bundled game files in this repository.
+executable="java"
+args="-version"

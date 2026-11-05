@@ -1,0 +1,7 @@
+/target/
+rustcraft.conf
+*.log
+*.exe
+*.jar
+*.class
+.env

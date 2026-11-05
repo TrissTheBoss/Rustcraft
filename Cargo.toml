@@ -1,0 +1,10 @@
+[package]
+name = "rustcraft"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "A minimal, user-configured Minecraft Java starter"
+
+[[bin]]
+name = "rustcraft"
+path = "src/main.rs"
