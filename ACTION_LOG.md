@@ -16,6 +16,7 @@ Each entry records date, action, result, and next step. Changes should be made i
 - Added the loopback trigger protocol and a Fabric client-mod source scaffold for Minecraft 26.3 / Fabric Loader 0.20.1. Rustcraft now supports `--listen`; the mod sends a tokenized trigger from key `J`. Rust tests pass. Fabric API dependency/build packaging remains the next step because the converted instance does not yet expose a selected Fabric API version.
 - Selected official Fabric API `0.162.0+26.3` and added a clean Gradle/Loom project configuration. Gradle 9.8.2 is installed. The current 26.3 non-obfuscated dependency resolution still needs the official template coordinates; no unverified jar was installed.
 - Finished the Fabric build using the official 26.3 source-set layout and modern names (`KeyMapping`, `InputConstants.Type.KEYBOARD`). Gradle 9.8.2 build passes. Installed the untracked `rustcraft-trigger-0.1.0.jar` into the local `Rustcraft testing` instance. Started Rustcraft listener and verified a loopback `RUSTCRAFT local-only` request returned `OK` and invoked Prism.
+- Began performance optimization: moved trigger socket I/O off Minecraft's client tick onto a Java virtual thread, added an in-flight guard to prevent duplicate launches, and added a 250 ms connection timeout. Rebuilt successfully and refreshed the local instance jar.
 
 ## Rough timeline
 
