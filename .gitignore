@@ -6,3 +6,5 @@ rustcraft.conf
 *.jar
 *.class
 .env
+/fabric-trigger-mod/.gradle/
+/fabric-trigger-mod/build/
