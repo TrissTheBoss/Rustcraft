@@ -19,6 +19,7 @@ Each entry records date, action, result, and next step. Changes should be made i
 - Began performance optimization: moved trigger socket I/O off Minecraft's client tick onto a Java virtual thread, added an in-flight guard to prevent duplicate launches, and added a 250 ms connection timeout. Rebuilt successfully and refreshed the local instance jar.
 - Added Rust release optimization settings (thin LTO, one codegen unit, stripping, abort-on-panic), enabled Gradle build/configuration caching, and documented the no-gameplay-change performance boundary. Next: user hardware testing of frame time and startup latency is required before changing client rendering or memory settings.
 - Added Rustcraft's built-in logger: millisecond UTC epoch timestamps, severity, session/process ID, event names, stderr mirroring, `RUSTCRAFT_LOG` override, 5 MiB rotation to `.log.1`, and redacted trigger audit events that never record tokens or game arguments. `cargo fmt`, tests, release build, and logger smoke test pass. Tagged `v0.2.5`.
+- Reviewed the launched Fabric instance: `rustcraft_trigger 0.1.0` loaded successfully with no errors. No Rustcraft runtime log existed because the listener was not running. Added mod-side structured logs for initialization, queued triggers, in-flight suppression, responses, and unavailable-listener warnings; rebuilt and refreshed the local jar. User trigger testing is now required.
 
 ## Rough timeline
 
