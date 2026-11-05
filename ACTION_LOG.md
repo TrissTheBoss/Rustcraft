@@ -20,6 +20,7 @@ Each entry records date, action, result, and next step. Changes should be made i
 - Added Rust release optimization settings (thin LTO, one codegen unit, stripping, abort-on-panic), enabled Gradle build/configuration caching, and documented the no-gameplay-change performance boundary. Next: user hardware testing of frame time and startup latency is required before changing client rendering or memory settings.
 - Added Rustcraft's built-in logger: millisecond UTC epoch timestamps, severity, session/process ID, event names, stderr mirroring, `RUSTCRAFT_LOG` override, 5 MiB rotation to `.log.1`, and redacted trigger audit events that never record tokens or game arguments. `cargo fmt`, tests, release build, and logger smoke test pass. Tagged `v0.2.5`.
 - Reviewed the launched Fabric instance: `rustcraft_trigger 0.1.0` loaded successfully with no errors. No Rustcraft runtime log existed because the listener was not running. Added mod-side structured logs for initialization, queued triggers, in-flight suppression, responses, and unavailable-listener warnings; rebuilt and refreshed the local jar. User trigger testing is now required.
+- Reproduced the reported launch issue: a Windows argument-list invocation truncated the config path at `C:\Users\Triss\Desktop\Rust`, causing `config_read_failed`. Verified environment-based startup, listener bind, and an authorized trigger returning `OK`. Added `start-rustcraft-listener.cmd` for quoting-safe Windows startup.
 
 ## Rough timeline
 
