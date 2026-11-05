@@ -2,10 +2,9 @@ package com.triss.rustcraft;
 
 import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
-import net.fabricmc.fabric.api.client.keybinding.v1.KeyBindingHelper;
-import net.minecraft.client.option.KeyBinding;
-import net.minecraft.client.util.InputUtil;
-import org.lwjgl.glfw.GLFW;
+import net.fabricmc.fabric.api.client.keymapping.v1.KeyMappingHelper;
+import net.minecraft.client.KeyMapping;
+import com.mojang.blaze3d.platform.InputConstants;
 
 import java.io.BufferedReader;
 import java.io.InputStreamReader;
@@ -16,14 +15,14 @@ import java.nio.charset.StandardCharsets;
 
 public final class RustcraftTriggerClient implements ClientModInitializer {
     private static final String TOKEN = "local-only";
-    private KeyBinding trigger;
+    private KeyMapping trigger;
 
     @Override public void onInitializeClient() {
-        trigger = KeyBindingHelper.registerKeyBinding(new KeyBinding(
-            "key.rustcraft_trigger.launch", InputUtil.Type.KEYSYM, GLFW.GLFW_KEY_J,
-            "category.rustcraft_trigger"));
+        trigger = KeyMappingHelper.registerKeyMapping(new KeyMapping(
+            "key.rustcraft_trigger.launch", InputConstants.Type.KEYBOARD, 74,
+            KeyMapping.Category.MISC));
         ClientTickEvents.END_CLIENT_TICK.register(client -> {
-            while (trigger.wasPressed()) sendTrigger();
+            while (trigger.consumeClick()) sendTrigger();
         });
     }
 
@@ -34,7 +33,7 @@ public final class RustcraftTriggerClient implements ClientModInitializer {
             out.println("RUSTCRAFT " + TOKEN);
             in.readLine();
         } catch (Exception ignored) {
-            // Rustcraft may not be running; the game must remain unaffected.
+            // Rustcraft may not be running; the game remains unaffected.
         }
     }
 }

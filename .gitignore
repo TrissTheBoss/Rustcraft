@@ -8,3 +8,4 @@ rustcraft.conf
 .env
 /fabric-trigger-mod/.gradle/
 /fabric-trigger-mod/build/
+/.fabric-example2/
