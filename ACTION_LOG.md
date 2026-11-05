@@ -10,6 +10,7 @@ Each entry records date, action, result, and next step. Changes should be made i
 - Attempted local verification; result: blocked because `cargo` is not installed or on PATH. Next: install Rust/Cargo or run CI before publishing a binary release.
 - Installed Rust stable 1.99.1 through rustup. `cargo fmt` passes; compilation then found the Windows MSVC linker was missing.
 - Started Visual Studio 2022 Build Tools with the C++ workload through winget. The installer was still active during this session, so `cargo test` remains pending until `link.exe` is available.
+- Verified the installation completed: MSVC `link.exe` is available from Visual Studio 2022 Build Tools. `cargo fmt --check`, `cargo test`, and `cargo run -- --help` all pass. Tagged this verified state as `v0.1.1`.
 
 ## Rough timeline
 
