@@ -1,4 +1,5 @@
 /target/
+.horizon-upstream/
 rustcraft.conf
 *.log
 *.exe

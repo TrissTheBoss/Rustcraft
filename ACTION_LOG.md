@@ -7,6 +7,7 @@ Each entry records date, action, result, and next step. Changes should be made i
 - Inspected Horizon's public repository and MIT license; result: license permits reuse with notices, but ownership/authentication constraints remain. Next: use only documented behavior or separately verified compatible code.
 - Checked Rustcraft's GitHub URL; result: no visible refs were returned. Next: initialize the local repository and publish when GitHub credentials permit.
 - Created the v0.1.0 clean-room baseline; result: minimal immediate-start CLI with explicit configuration. Next: run formatting, tests, and smoke launch.
+- Attempted local verification; result: blocked because `cargo` is not installed or on PATH. Next: install Rust/Cargo or run CI before publishing a binary release.
 
 ## Rough timeline
 
