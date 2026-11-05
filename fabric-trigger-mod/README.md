@@ -10,4 +10,4 @@ rustcraft.exe --listen --config rustcraft.conf
 
 The mod uses loopback only and contains no account, network-service, or file-discovery logic. Change the token in both the Rustcraft environment (`RUSTCRAFT_TRIGGER_TOKEN`) and the mod configuration before using a non-default token. Do not expose the listener beyond localhost.
 
-This folder is currently a source scaffold. Before packaging, add the Fabric API version selected for the instance and build it with a pinned Gradle/Fabric Loom toolchain; do not commit the resulting jar or local instance files.
+Build with Gradle 9.8.2 or newer. The pinned target is Minecraft 26.3, Fabric Loader 0.20.1, Fabric API 0.165.0+26.3, and Loom 1.19-SNAPSHOT. The mod keeps trigger networking off the client tick, uses one in-flight request, loopback-only networking, and a bounded timeout. It does not alter render settings or world data automatically.
