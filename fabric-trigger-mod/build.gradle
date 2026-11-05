@@ -5,6 +5,15 @@ plugins {
 version = project.mod_version
 group = project.maven_group
 base { archivesName = 'rustcraft-trigger' }
+loom {
+    splitEnvironmentSourceSets()
+    mods {
+        rustcraft_trigger {
+            sourceSet sourceSets.main
+            sourceSet sourceSets.client
+        }
+    }
+}
 dependencies {
     minecraft "com.mojang:minecraft:${minecraft_version}"
     implementation "net.fabricmc:fabric-loader:${loader_version}"
