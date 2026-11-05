@@ -11,6 +11,7 @@ Each entry records date, action, result, and next step. Changes should be made i
 - Installed Rust stable 1.99.1 through rustup. `cargo fmt` passes; compilation then found the Windows MSVC linker was missing.
 - Started Visual Studio 2022 Build Tools with the C++ workload through winget. The installer was still active during this session, so `cargo test` remains pending until `link.exe` is available.
 - Verified the installation completed: MSVC `link.exe` is available from Visual Studio 2022 Build Tools. `cargo fmt --check`, `cargo test`, and `cargo run -- --help` all pass. Tagged this verified state as `v0.1.1`.
+- Ran the release binary with `rustcraft.conf.example`; it launched Java 21 successfully. Fixed argument quote handling discovered during that run, then reran `cargo fmt --check`, `cargo test`, and the release smoke test successfully. Tagged `v0.1.2`.
 
 ## Rough timeline
 

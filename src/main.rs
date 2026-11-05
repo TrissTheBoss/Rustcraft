@@ -25,7 +25,12 @@ fn read_command(path: &PathBuf) -> io::Result<(String, Vec<String>)> {
         if let Some(value) = line.strip_prefix("executable=") {
             executable = Some(value.trim().trim_matches('"').to_owned());
         } else if let Some(value) = line.strip_prefix("args=") {
-            args = value.split_whitespace().map(str::to_owned).collect();
+            args = value
+                .trim()
+                .trim_matches('"')
+                .split_whitespace()
+                .map(str::to_owned)
+                .collect();
         } else {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
