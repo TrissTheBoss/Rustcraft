@@ -8,6 +8,8 @@ Each entry records date, action, result, and next step. Changes should be made i
 - Checked Rustcraft's GitHub URL; result: no visible refs were returned. Next: initialize the local repository and publish when GitHub credentials permit.
 - Created the v0.1.0 clean-room baseline; result: minimal immediate-start CLI with explicit configuration. Next: run formatting, tests, and smoke launch.
 - Attempted local verification; result: blocked because `cargo` is not installed or on PATH. Next: install Rust/Cargo or run CI before publishing a binary release.
+- Installed Rust stable 1.99.1 through rustup. `cargo fmt` passes; compilation then found the Windows MSVC linker was missing.
+- Started Visual Studio 2022 Build Tools with the C++ workload through winget. The installer was still active during this session, so `cargo test` remains pending until `link.exe` is available.
 
 ## Rough timeline
 
