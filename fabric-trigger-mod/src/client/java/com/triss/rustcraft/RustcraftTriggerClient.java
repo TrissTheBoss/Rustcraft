@@ -22,6 +22,7 @@ public final class RustcraftTriggerClient implements ClientModInitializer {
     private static final String TOKEN = "local-only";
     private static final AtomicBoolean TRIGGER_IN_FLIGHT = new AtomicBoolean();
     private KeyMapping trigger;
+    private boolean triggerWasDown;
 
     @Override public void onInitializeClient() {
         LOGGER.info("Rustcraft Trigger initialized: loopback=127.0.0.1:39281 key=J");
@@ -29,7 +30,10 @@ public final class RustcraftTriggerClient implements ClientModInitializer {
             "key.rustcraft_trigger.launch", InputConstants.Type.KEYBOARD, 74,
             KeyMapping.Category.MISC));
         ClientTickEvents.END_CLIENT_TICK.register(client -> {
-            while (trigger.consumeClick()) sendTriggerAsync();
+            boolean down = trigger.isDown();
+            if (down && !triggerWasDown) sendTriggerAsync();
+            while (trigger.consumeClick()) { /* drain Fabric's queue */ }
+            triggerWasDown = down;
         });
     }
 

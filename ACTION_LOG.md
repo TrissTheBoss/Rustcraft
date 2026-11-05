@@ -21,6 +21,7 @@ Each entry records date, action, result, and next step. Changes should be made i
 - Added Rustcraft's built-in logger: millisecond UTC epoch timestamps, severity, session/process ID, event names, stderr mirroring, `RUSTCRAFT_LOG` override, 5 MiB rotation to `.log.1`, and redacted trigger audit events that never record tokens or game arguments. `cargo fmt`, tests, release build, and logger smoke test pass. Tagged `v0.2.5`.
 - Reviewed the launched Fabric instance: `rustcraft_trigger 0.1.0` loaded successfully with no errors. No Rustcraft runtime log existed because the listener was not running. Added mod-side structured logs for initialization, queued triggers, in-flight suppression, responses, and unavailable-listener warnings; rebuilt and refreshed the local jar. User trigger testing is now required.
 - Reproduced the reported launch issue: a Windows argument-list invocation truncated the config path at `C:\Users\Triss\Desktop\Rust`, causing `config_read_failed`. Verified environment-based startup, listener bind, and an authorized trigger returning `OK`. Added `start-rustcraft-listener.cmd` for quoting-safe Windows startup.
+- Reviewed the next in-game J press: the Fabric initialization log was present, but no `Trigger queued` event appeared, so the key event was not reaching the queued-input path. Added a direct key-state edge detector while retaining queue draining, rebuilt the Fabric mod, and refreshed the local Prism instance jar. Next: restart the Minecraft instance and press J once for verification.
 
 ## Rough timeline
 
