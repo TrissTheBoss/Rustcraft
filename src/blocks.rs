@@ -6,6 +6,41 @@
 
 use crate::world::BlockId;
 
+const SNOW_SHAPES: [[Aabb; 1]; 8] = [
+    [Aabb {
+        min: [0.0, 0.0, 0.0],
+        max: [1.0, 1.0 / 8.0, 1.0],
+    }],
+    [Aabb {
+        min: [0.0, 0.0, 0.0],
+        max: [1.0, 2.0 / 8.0, 1.0],
+    }],
+    [Aabb {
+        min: [0.0, 0.0, 0.0],
+        max: [1.0, 3.0 / 8.0, 1.0],
+    }],
+    [Aabb {
+        min: [0.0, 0.0, 0.0],
+        max: [1.0, 4.0 / 8.0, 1.0],
+    }],
+    [Aabb {
+        min: [0.0, 0.0, 0.0],
+        max: [1.0, 5.0 / 8.0, 1.0],
+    }],
+    [Aabb {
+        min: [0.0, 0.0, 0.0],
+        max: [1.0, 6.0 / 8.0, 1.0],
+    }],
+    [Aabb {
+        min: [0.0, 0.0, 0.0],
+        max: [1.0, 7.0 / 8.0, 1.0],
+    }],
+    [Aabb {
+        min: [0.0, 0.0, 0.0],
+        max: [1.0, 1.0, 1.0],
+    }],
+];
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Aabb {
     pub min: [f64; 3],
@@ -38,6 +73,89 @@ impl Aabb {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CollisionShape {
     boxes: &'static [Aabb],
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BlockKind {
+    Air,
+    FullBlock,
+    Slab,
+    Carpet,
+    Snow,
+    Farmland,
+    Path,
+    Fence,
+    Pane,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BlockState {
+    pub kind: BlockKind,
+    /// Slab/fence/pane orientation or variant flag. For slabs, `true` means
+    /// top slab; for fences/panes it is reserved for future connection data.
+    pub upper: bool,
+    /// Snow layer count, clamped to the Java block-state range 1..=8.
+    pub layers: u8,
+}
+
+impl BlockState {
+    pub const fn full_block() -> Self {
+        Self {
+            kind: BlockKind::FullBlock,
+            upper: false,
+            layers: 1,
+        }
+    }
+
+    pub const fn shape(self) -> CollisionShape {
+        match self.kind {
+            BlockKind::Air => CollisionShape::EMPTY,
+            BlockKind::FullBlock => CollisionShape::FULL_BLOCK,
+            BlockKind::Slab => {
+                if self.upper {
+                    CollisionShape::from_boxes(&[Aabb {
+                        min: [0.0, 0.5, 0.0],
+                        max: [1.0, 1.0, 1.0],
+                    }])
+                } else {
+                    CollisionShape::from_boxes(&[Aabb {
+                        min: [0.0, 0.0, 0.0],
+                        max: [1.0, 0.5, 1.0],
+                    }])
+                }
+            }
+            BlockKind::Carpet => CollisionShape::from_boxes(&[Aabb {
+                min: [0.0, 0.0, 0.0],
+                max: [1.0, 1.0 / 16.0, 1.0],
+            }]),
+            BlockKind::Snow => {
+                let layers = if self.layers < 1 {
+                    1
+                } else if self.layers > 8 {
+                    8
+                } else {
+                    self.layers
+                };
+                CollisionShape::from_boxes(&SNOW_SHAPES[layers as usize - 1])
+            }
+            BlockKind::Farmland => CollisionShape::from_boxes(&[Aabb {
+                min: [0.0, 0.0, 0.0],
+                max: [1.0, 15.0 / 16.0, 1.0],
+            }]),
+            BlockKind::Path => CollisionShape::from_boxes(&[Aabb {
+                min: [0.0, 0.0, 0.0],
+                max: [1.0, 15.0 / 16.0, 1.0],
+            }]),
+            BlockKind::Fence => CollisionShape::from_boxes(&[Aabb {
+                min: [6.0 / 16.0, 0.0, 6.0 / 16.0],
+                max: [10.0 / 16.0, 1.5, 10.0 / 16.0],
+            }]),
+            BlockKind::Pane => CollisionShape::from_boxes(&[Aabb {
+                min: [7.0 / 16.0, 0.0, 7.0 / 16.0],
+                max: [9.0 / 16.0, 1.0, 9.0 / 16.0],
+            }]),
+        }
+    }
 }
 
 impl CollisionShape {
@@ -132,6 +250,38 @@ mod tests {
         assert_eq!(
             Aabb::FULL_BLOCK.translated([2, -1, 4]).min,
             [2.0, -1.0, 4.0]
+        );
+    }
+
+    #[test]
+    fn state_shapes_match_documented_voxel_dimensions() {
+        let bottom_slab = BlockState {
+            kind: BlockKind::Slab,
+            upper: false,
+            layers: 1,
+        };
+        assert_eq!(bottom_slab.shape().boxes()[0].max[1], 0.5);
+        assert_eq!(
+            BlockState {
+                kind: BlockKind::Snow,
+                upper: false,
+                layers: 8,
+            }
+            .shape()
+            .boxes()[0]
+                .max[1],
+            1.0
+        );
+        assert_eq!(
+            BlockState {
+                kind: BlockKind::Carpet,
+                upper: false,
+                layers: 1,
+            }
+            .shape()
+            .boxes()[0]
+                .max[1],
+            1.0 / 16.0
         );
     }
 }
