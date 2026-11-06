@@ -19,9 +19,10 @@ dependencies {
     implementation "net.fabricmc:fabric-loader:${loader_version}"
     implementation "net.fabricmc.fabric-api:fabric-api:${fabric_api_version}"
 }
+def modVersion = project.version
 processResources {
-    inputs.property 'version', project.version
-    filesMatching('fabric.mod.json') { expand 'version': project.version }
+    inputs.property 'version', modVersion
+    filesMatching('fabric.mod.json') { expand 'version': modVersion }
 }
 java { toolchain.languageVersion = JavaLanguageVersion.of(25); withSourcesJar() }
 tasks.withType(JavaCompile).configureEach { options.release = 25 }

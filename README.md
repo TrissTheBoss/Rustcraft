@@ -15,6 +15,10 @@ Use `RUSTCRAFT_CONFIG` or `--config path/to/file` for a configuration outside th
 
 The `fabric-trigger-mod` source scaffold lets a client-only Fabric mod trigger Rustcraft over loopback. Start Rustcraft with `--listen --config rustcraft.conf`, or run `start-rustcraft-listener.cmd` on Windows. Install the built mod in the Fabric instance, then open Minecraft Controls and assign `Rustcraft: Launch` to `J` (the default Minecraft binding may be `Home`) before pressing it in-game. The listener binds only to `127.0.0.1:39281` and requires a local token. It never handles Minecraft credentials.
 
+## In-game performance profile
+
+The Fabric mod includes an opt-in client-only profile. Set `RUSTCRAFT_PERFORMANCE=balanced` before starting Prism/Minecraft to disable entity shadows and use minimal particles after a world loads. This changes visual settings only; it does not change gameplay, server simulation, networking, or world data. Remove the variable to preserve the instance's normal settings.
+
 ## Scope and provenance
 
 This project is a clean-room implementation. Horizon was inspected only for publicly documented behavior, repository structure, and license obligations. No Horizon source is included in this baseline. Horizon is MIT-licensed; if compatible code is later reused, its copyright and license notice will be retained in `THIRD_PARTY_NOTICES.md` and the exact source will be recorded in the decision log.
