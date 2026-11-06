@@ -12,7 +12,9 @@ pub const SPRINT_ACCELERATION: f64 = WALK_ACCELERATION * 1.30;
 pub const GROUND_FRICTION: f64 = 0.546;
 pub const AIR_FRICTION: f64 = 0.91;
 pub const GRAVITY: f64 = 0.08;
-pub const JUMP_IMPULSE: f64 = 0.42;
+// Tuned for the 20 Hz discrete integrator: approximately 1.25 blocks of
+// vertical rise, enough to clear one full block without an auto-step.
+pub const JUMP_IMPULSE: f64 = 0.45;
 pub const FLIGHT_ACCELERATION: f64 = 0.049;
 pub const FLIGHT_SPEED_MULTIPLIER: f64 = 2.0;
 pub const WALK_SPEED_PER_TICK: f64 = 4.317 / TICKS_PER_SECOND;
@@ -127,9 +129,12 @@ impl PlayerController {
                 self.velocity[2] *= scale;
             }
         }
+        move_axis(self, 1, &is_solid);
+        // Resolve vertical motion first. This lets a jump raise the player's
+        // AABB above a one-block obstacle before horizontal collision checks,
+        // instead of treating the obstacle as an impenetrable wall.
         move_axis(self, 0, &is_solid);
         move_axis(self, 2, &is_solid);
-        move_axis(self, 1, &is_solid);
         if self.transform.y < self.half_extents[1] {
             self.transform.y = self.half_extents[1];
             self.velocity[1] = 0.0;
@@ -286,7 +291,7 @@ mod tests {
                 solid,
             );
         }
-        assert!(player.transform.x > 0.5);
+        assert!(player.transform.x > 1.0);
     }
 
     #[test]
