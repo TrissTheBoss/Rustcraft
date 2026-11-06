@@ -5,6 +5,10 @@ edition = "2021"
 license = "MIT"
 description = "A clean-room Rust voxel engine foundation"
 
+[dependencies]
+anyhow = "1"
+zip = "0.6"
+
 [lib]
 path = "src/lib.rs"
 

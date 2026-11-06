@@ -7,6 +7,16 @@ use voxel_engine::render::{
 use voxel_engine::world::{BlockId, ChunkPos, World, CHUNK_SIZE};
 
 fn main() {
+    if std::env::args().nth(1).as_deref() == Some("--extract-assets") {
+        let jar = std::env::args().nth(2).map(std::path::PathBuf::from);
+        let count = voxel_engine::asset_extract::extract(
+            jar.as_deref(),
+            std::path::Path::new("assets/extracted"),
+        )
+        .expect("asset extraction failed");
+        println!("extracted {count} local asset files into assets/extracted");
+        return;
+    }
     #[cfg(windows)]
     {
         voxel_engine::window::run();

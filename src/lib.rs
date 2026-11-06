@@ -1,4 +1,5 @@
 //! Clean-room voxel engine foundation. No Minecraft code or assets are included.
+pub mod asset_extract;
 pub mod entity;
 pub mod networking;
 pub mod render;

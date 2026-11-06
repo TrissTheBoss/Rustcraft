@@ -1,4 +1,5 @@
 /target/
+/assets/extracted/
 .horizon-upstream/
 rustcraft.conf
 *.log
