@@ -8,6 +8,26 @@ use zip::ZipArchive;
 
 const BLOCK_PREFIX: &str = "assets/minecraft/textures/block/";
 const ITEM_PREFIX: &str = "assets/minecraft/textures/item/";
+const CACHE_VERSION: &str = "block-textures-v1";
+
+/// Ensures the local visual cache contains the textures currently consumed by
+/// the prototype. This is strictly offline: it only reads a locally installed
+/// client JAR and writes the ignored project cache.
+pub fn ensure_cached(output: &Path) -> Result<bool> {
+    let marker = output.join(".cache-version");
+    let required = [
+        output.join("textures/blocks/dirt.png"),
+        output.join("textures/blocks/grass_block_side.png"),
+        output.join("textures/blocks/stone.png"),
+    ];
+    if marker.is_file() && required.iter().all(|path| path.is_file()) {
+        return Ok(false);
+    }
+    let count = extract(None, output)?;
+    fs::write(&marker, CACHE_VERSION)
+        .with_context(|| format!("cannot write texture cache marker {}", marker.display()))?;
+    Ok(count > 0)
+}
 
 pub fn extract(jar: Option<&Path>, output: &Path) -> Result<usize> {
     let jar = jar

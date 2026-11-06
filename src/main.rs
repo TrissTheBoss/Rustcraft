@@ -24,6 +24,24 @@ fn main() {
         println!("extracted {count} local asset files into assets/extracted");
         return;
     }
+    let cache_path = std::path::Path::new("assets/extracted");
+    match voxel_engine::asset_extract::ensure_cached(cache_path) {
+        Ok(true) => {
+            if let Some(logger) = &logger {
+                logger.event("INFO", "asset_cache_refreshed", "source=local-client-jar");
+            }
+        }
+        Ok(false) => {
+            if let Some(logger) = &logger {
+                logger.event("TRACE", "asset_cache_hit", cache_path.display().to_string());
+            }
+        }
+        Err(error) => {
+            if let Some(logger) = &logger {
+                logger.event("WARN", "asset_cache_unavailable", error.to_string());
+            }
+        }
+    }
     #[cfg(windows)]
     {
         voxel_engine::window::run(logger);
