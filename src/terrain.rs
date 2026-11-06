@@ -1,6 +1,6 @@
 //! Independently authored deterministic terrain generation.
 
-use crate::world::{BlockId, Chunk, ChunkPos, CHUNK_SIZE};
+use crate::world::{BlockId, Chunk, ChunkPos, World, CHUNK_SIZE};
 
 pub const AIR: BlockId = BlockId(0);
 pub const SOIL: BlockId = BlockId(1);
@@ -52,6 +52,17 @@ impl TerrainGenerator {
             }
         }
         chunk
+    }
+
+    pub fn generate_region(&self, radius: i32) -> World {
+        let mut world = World::new();
+        for z in -radius..=radius {
+            for x in -radius..=radius {
+                let position = ChunkPos { x, y: 0, z };
+                *world.get_or_create_chunk(position) = self.generate_chunk(position);
+            }
+        }
+        world
     }
 }
 

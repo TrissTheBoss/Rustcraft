@@ -8,10 +8,10 @@ use std::ptr::{null, null_mut};
 use crate::logger::Logger;
 use crate::render::{
     mesh_chunk, Camera, CpuRenderer, DirectionalLight, InputKey, InputState, Material,
-    MaterialRegistry, Renderer, Vec3,
+    MaterialRegistry, Mesh, Renderer, Vec3,
 };
 use crate::terrain::{TerrainGenerator, ROCK, SOIL, SURFACE};
-use crate::world::{BlockId, ChunkPos, World};
+use crate::world::{BlockId, ChunkPos, CHUNK_SIZE};
 
 type Hinstance = *mut c_void;
 type Hwnd = *mut c_void;
@@ -415,19 +415,32 @@ pub fn run(logger: Option<Logger>) {
 }
 
 fn build_frame(camera: Camera, width: u32, height: u32) -> (Vec<u8>, BitmapInfo) {
-    let mut world = World::new();
-    let generated = TerrainGenerator::default().generate_chunk(ChunkPos { x: 0, y: 0, z: 0 });
-    let chunk = world.get_or_create_chunk(ChunkPos { x: 0, y: 0, z: 0 });
-    *chunk = generated;
-    let mesh = mesh_chunk(chunk, |x, y, z| {
-        x >= 0
-            && y >= 0
-            && z >= 0
-            && x < 16
-            && y < 16
-            && z < 16
-            && chunk.get(x as usize, y as usize, z as usize).unwrap() != BlockId(0)
-    });
+    let world = TerrainGenerator::default().generate_region(2);
+    let mut meshes = Vec::<Mesh>::new();
+    for z in -2..=2 {
+        for x in -2..=2 {
+            let position = ChunkPos { x, y: 0, z };
+            let chunk = world.get_chunk(position).unwrap();
+            let mut mesh = mesh_chunk(chunk, |local_x, local_y, local_z| {
+                let neighbor = ChunkPos {
+                    x: position.x + local_x.div_euclid(CHUNK_SIZE as i32),
+                    y: position.y + local_y.div_euclid(CHUNK_SIZE as i32),
+                    z: position.z + local_z.div_euclid(CHUNK_SIZE as i32),
+                };
+                let lx = local_x.rem_euclid(CHUNK_SIZE as i32) as usize;
+                let ly = local_y.rem_euclid(CHUNK_SIZE as i32) as usize;
+                let lz = local_z.rem_euclid(CHUNK_SIZE as i32) as usize;
+                world
+                    .get_chunk(neighbor)
+                    .is_some_and(|candidate| candidate.get(lx, ly, lz).unwrap() != BlockId(0))
+            });
+            for vertex in &mut mesh.vertices {
+                vertex.position.x += (x * CHUNK_SIZE as i32) as f32;
+                vertex.position.z += (z * CHUNK_SIZE as i32) as f32;
+            }
+            meshes.push(mesh);
+        }
+    }
     let mut materials = MaterialRegistry::default();
     materials
         .register(
@@ -456,11 +469,12 @@ fn build_frame(camera: Camera, width: u32, height: u32) -> (Vec<u8>, BitmapInfo)
             },
         )
         .unwrap();
+    let mesh_refs: Vec<&Mesh> = meshes.iter().collect();
     let frame = CpuRenderer {
         clear_color: [92, 142, 190],
     }
     .render(
-        &[&mesh],
+        &mesh_refs,
         &camera,
         &materials,
         DirectionalLight::default(),

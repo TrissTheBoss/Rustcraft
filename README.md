@@ -6,7 +6,7 @@ Voxel Engine is a clean-room Rust project for building an original voxel game en
 
 The roadmap covers original implementations of rendering, world/chunk storage and streaming, meshing, lighting, entities, collision, deterministic simulation, networking, resource formats, and developer tooling.
 
-The current `0.5.0` build contains the world foundation, deterministic terrain generation, fixed-step simulation with voxel collision queries and replay snapshots, and a dependency-free CPU rendering pipeline. On Windows, running the binary opens a native prototype window displaying generated layered terrain; non-Windows builds retain the headless metrics demo. It does not yet provide original texture packs, a GPU backend, or a complete game loop.
+The current `0.6.0` build contains the world foundation, deterministic terrain generation, fixed-step simulation with voxel collision queries and replay snapshots, and a dependency-free CPU rendering pipeline. On Windows, running the binary opens a native prototype window displaying a bounded 5x5 chunk region with cross-chunk face culling; non-Windows builds retain the headless metrics demo. It does not yet provide original texture packs, a GPU backend, or a complete game loop.
 
 ## Compatibility boundary
 
@@ -63,6 +63,8 @@ Rendering implementation status: the CPU pipeline is implemented in `src/render.
 ### v0.5 — Developer tooling
 
 Terrain implementation status: `src/terrain.rs` generates deterministic seeded chunks with varied surface, soil, and rock layers. These are original engine blocks and procedural colors; Minecraft-owned textures and assets are intentionally not included.
+
+Large-world rendering status: the prototype generates a bounded chunk region, meshes each chunk with neighboring occupancy checks, and translates meshes into world space. Runtime chunk streaming and GPU batching remain the next scale steps.
 
 - Add a world inspector and chunk visualizer.
 - Add resource validation and format conversion tools.
