@@ -36,6 +36,8 @@ const SRCCOPY: u32 = 0x00CC0020;
 const TIMER_ID: usize = 1;
 const VK_ESCAPE: u32 = 0x1B;
 const WM_LBUTTONDOWN: u32 = 0x0201;
+const MAX_RENDER_WIDTH: u32 = 960;
+const MAX_RENDER_HEIGHT: u32 = 600;
 const SM_CXSCREEN: i32 = 0;
 const SM_CYSCREEN: i32 = 1;
 
@@ -161,6 +163,12 @@ struct Message {
 
 static mut FRAME: Option<(Vec<u8>, BitmapInfo)> = None;
 static mut APP: Option<AppState> = None;
+static mut SCENE: Option<Scene> = None;
+
+struct Scene {
+    meshes: Vec<Mesh>,
+    materials: MaterialRegistry,
+}
 
 struct AppState {
     camera: Camera,
@@ -170,6 +178,8 @@ struct AppState {
     cursor_locked: bool,
     width: i32,
     height: i32,
+    render_width: u32,
+    render_height: u32,
     logger: Logger,
 }
 
@@ -201,12 +211,19 @@ unsafe extern "system" fn window_proc(
             };
             let hdc = BeginPaint(window, &mut paint);
             if let Some((pixels, info)) = FRAME.as_ref() {
+                let mut client = Rect {
+                    left: 0,
+                    top: 0,
+                    right: info.header.width,
+                    bottom: info.header.height.abs(),
+                };
+                GetClientRect(window, &mut client);
                 StretchDIBits(
                     hdc,
                     0,
                     0,
-                    info.header.width,
-                    info.header.height.abs(),
+                    client.right,
+                    client.bottom,
                     0,
                     0,
                     info.header.width,
@@ -231,7 +248,14 @@ unsafe extern "system" fn window_proc(
                     app.pitch.cos() * app.yaw.sin(),
                 );
                 app.camera.target = app.camera.position + direction;
-                FRAME = Some(build_frame(app.camera, app.width as u32, app.height as u32));
+                if let Some(scene) = SCENE.as_ref() {
+                    FRAME = Some(build_frame(
+                        app.camera,
+                        app.render_width,
+                        app.render_height,
+                        scene,
+                    ));
+                }
                 app.logger.event(
                     "TRACE",
                     "frame_rendered",
@@ -351,6 +375,8 @@ pub fn run(logger: Option<Logger>) {
             cursor_locked: true,
             width,
             height,
+            render_width: (width as u32).min(MAX_RENDER_WIDTH),
+            render_height: (height as u32).min(MAX_RENDER_HEIGHT),
             logger: logger.unwrap_or_else(|| Logger::start("voxel-engine.log").expect("logger")),
         });
         if let Some(app) = APP.as_ref() {
@@ -360,7 +386,13 @@ pub fn run(logger: Option<Logger>) {
                 format!("width={} height={}", width, height),
             );
         }
-        FRAME = Some(build_frame(Camera::default(), width as u32, height as u32));
+        SCENE = Some(build_scene());
+        FRAME = Some(build_frame(
+            Camera::default(),
+            (width as u32).min(MAX_RENDER_WIDTH),
+            (height as u32).min(MAX_RENDER_HEIGHT),
+            SCENE.as_ref().unwrap(),
+        ));
     }
     let class = wide("VoxelEngineWindow");
     let title = wide("Voxel Engine - Prototype");
@@ -414,7 +446,7 @@ pub fn run(logger: Option<Logger>) {
     }
 }
 
-fn build_frame(camera: Camera, width: u32, height: u32) -> (Vec<u8>, BitmapInfo) {
+fn build_scene() -> Scene {
     let world = TerrainGenerator::default().generate_region(2);
     let mut meshes = Vec::<Mesh>::new();
     for z in -2..=2 {
@@ -470,14 +502,18 @@ fn build_frame(camera: Camera, width: u32, height: u32) -> (Vec<u8>, BitmapInfo)
             },
         )
         .unwrap();
-    let mesh_refs: Vec<&Mesh> = meshes.iter().collect();
+    Scene { meshes, materials }
+}
+
+fn build_frame(camera: Camera, width: u32, height: u32, scene: &Scene) -> (Vec<u8>, BitmapInfo) {
+    let mesh_refs: Vec<&Mesh> = scene.meshes.iter().collect();
     let frame = CpuRenderer {
         clear_color: [92, 142, 190],
     }
     .render(
         &mesh_refs,
         &camera,
-        &materials,
+        &scene.materials,
         DirectionalLight::default(),
         width,
         height,

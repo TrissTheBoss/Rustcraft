@@ -6,7 +6,7 @@ Voxel Engine is a clean-room Rust project for building an original voxel game en
 
 The roadmap covers original implementations of rendering, world/chunk storage and streaming, meshing, lighting, entities, collision, deterministic simulation, networking, resource formats, and developer tooling.
 
-The current `0.7.0` build contains the world foundation, deterministic terrain generation, fixed-step simulation with voxel collision queries and replay snapshots, and an optimized dependency-free CPU rendering pipeline. On Windows, running the binary opens a native prototype window displaying a bounded 5x5 chunk region with greedy meshing, cross-chunk face culling, configurable 60° FOV, and mesh frustum culling; non-Windows builds retain the headless metrics demo.
+The current `0.7.1` build contains the world foundation, deterministic terrain generation, fixed-step simulation with voxel collision queries and replay snapshots, and an optimized dependency-free CPU rendering pipeline. On Windows, running the binary opens a native prototype window displaying a bounded 5x5 chunk region with cached greedy meshes, cross-chunk face culling, configurable 60° FOV, mesh frustum culling, and capped internal render resolution; non-Windows builds retain the headless metrics demo.
 
 ## Compatibility boundary
 
@@ -66,7 +66,7 @@ Terrain implementation status: `src/terrain.rs` generates deterministic seeded c
 
 Large-world rendering status: the prototype generates a bounded chunk region, meshes each chunk with neighboring occupancy checks, and translates meshes into world space. Runtime chunk streaming and GPU batching remain the next scale steps.
 
-Performance status: greedy meshing merges coplanar faces with matching block IDs and scales UVs for repeated textures. Mesh bounds are tested against the camera frustum before rasterization. The CPU renderer remains a prototype and is not yet a substitute for GPU batching.
+Performance status: greedy meshing merges coplanar faces with matching block IDs and scales UVs for repeated textures. Mesh bounds are tested against the camera frustum before rasterization. Terrain and meshes are cached instead of rebuilt every frame, and the CPU render buffer is capped at 960x600 before scaling to the native window. The CPU renderer remains a prototype and is not yet a substitute for GPU batching.
 
 - Add a world inspector and chunk visualizer.
 - Add resource validation and format conversion tools.
