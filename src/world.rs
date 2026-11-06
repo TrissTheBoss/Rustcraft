@@ -38,6 +38,20 @@ impl Chunk {
         self.blocks[index(x, y, z)?] = block;
         Ok(())
     }
+
+    fn write_blocks<W: Write>(&self, output: &mut W) -> io::Result<()> {
+        for block in self.blocks.iter() {
+            output.write_all(&block.0.to_le_bytes())?;
+        }
+        Ok(())
+    }
+
+    fn read_blocks<R: Read>(&mut self, input: &mut R) -> io::Result<()> {
+        for block in self.blocks.iter_mut() {
+            *block = BlockId(read_u16(input)?);
+        }
+        Ok(())
+    }
 }
 
 fn index(x: usize, y: usize, z: usize) -> Result<usize, &'static str> {
@@ -78,15 +92,7 @@ impl World {
             output.write_all(&position.x.to_le_bytes())?;
             output.write_all(&position.y.to_le_bytes())?;
             output.write_all(&position.z.to_le_bytes())?;
-            for y in 0..CHUNK_SIZE {
-                for z in 0..CHUNK_SIZE {
-                    for x in 0..CHUNK_SIZE {
-                        output.write_all(
-                            &self.chunks[&position].get(x, y, z).unwrap().0.to_le_bytes(),
-                        )?;
-                    }
-                }
-            }
+            self.chunks[&position].write_blocks(&mut output)?;
         }
         Ok(())
     }
@@ -108,16 +114,9 @@ impl World {
                 y: read_i32(&mut input)?,
                 z: read_i32(&mut input)?,
             };
-            let chunk = world.get_or_create_chunk(position);
-            for y in 0..CHUNK_SIZE {
-                for z in 0..CHUNK_SIZE {
-                    for x in 0..CHUNK_SIZE {
-                        chunk
-                            .set(x, y, z, BlockId(read_u16(&mut input)?))
-                            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-                    }
-                }
-            }
+            world
+                .get_or_create_chunk(position)
+                .read_blocks(&mut input)?;
         }
         Ok(world)
     }

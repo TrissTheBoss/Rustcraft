@@ -1,4 +1,4 @@
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct EntityId(pub u64);
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]

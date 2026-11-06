@@ -1,7 +1,9 @@
 //! Clean-room voxel engine foundation. No Minecraft code or assets are included.
 pub mod entity;
 pub mod networking;
+pub mod render;
 pub mod resource;
+pub mod simulation;
 pub mod world;
 
 pub const ENGINE_NAME: &str = "Voxel Engine";

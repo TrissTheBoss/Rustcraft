@@ -6,7 +6,7 @@ Voxel Engine is a clean-room Rust project for building an original voxel game en
 
 The roadmap covers original implementations of rendering, world/chunk storage and streaming, meshing, lighting, entities, collision, deterministic simulation, networking, resource formats, and developer tooling.
 
-The current `0.1.0` build is only a tested foundation: chunk storage, entity primitives, resource manifests, and a protocol-neutral session boundary.
+The current `0.3.0` build contains the headless world foundation, deterministic fixed-step simulation, and a dependency-free CPU rendering pipeline. Running the binary generates an original flat scene, meshes its visible faces, rasterizes a 320x200 frame, and reports visible pixels and render timing. It does not yet create a window or use a GPU.
 
 ## Compatibility boundary
 
@@ -21,6 +21,8 @@ cargo fmt --check
 cargo test
 cargo run --release
 ```
+
+The release command executes the headless prototype scene and does not write world or build data.
 
 Generated builds, local caches, game data, credentials, and external source checkouts are excluded from Git.
 
@@ -45,12 +47,16 @@ CI runs formatting, tests, and a release build through GitHub Actions.
 - Add gravity and movement integration.
 - Add deterministic replay fixtures and simulation regression tests.
 
+Simulation implementation status: `src/simulation.rs` provides a fixed-step clock, stable entity lifecycle storage, gravity, and ground-plane collision with regression tests.
+
 ### v0.4 — Rendering foundation
 
 - Select and document the window/GPU stack, initially evaluating `wgpu`.
 - Add input, camera, frame scheduling, and renderer abstraction layers.
 - Add chunk meshing, face culling, texture/resource loading, and basic lighting.
 - Add frame-time and memory profiling before optimization decisions.
+
+Rendering implementation status: the CPU pipeline is implemented in `src/render.rs` and exercised by unit tests. Window creation and GPU presentation are pending because this environment cannot download the selected `wgpu`/`winit` dependencies. The CPU renderer is a testable baseline, not a claim that the interactive rendering milestone is complete.
 
 ### v0.5 — Developer tooling
 
