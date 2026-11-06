@@ -32,6 +32,10 @@ const SW_SHOW: i32 = 5;
 const DIB_RGB_COLORS: u32 = 0;
 const SRCCOPY: u32 = 0x00CC0020;
 const TIMER_ID: usize = 1;
+const FRAME_WIDTH: i32 = 960;
+const FRAME_HEIGHT: i32 = 600;
+const VK_ESCAPE: u32 = 0x1B;
+const WM_LBUTTONDOWN: u32 = 0x0201;
 
 #[repr(C)]
 struct Point {
@@ -116,6 +120,10 @@ extern "system" {
     fn PostQuitMessage(code: i32);
     fn InvalidateRect(window: Hwnd, rect: *const Rect, erase: i32) -> i32;
     fn SetTimer(window: Hwnd, id: usize, interval: u32, callback: *mut c_void) -> usize;
+    fn ClipCursor(rect: *const Rect) -> i32;
+    fn ShowCursor(show: i32) -> i32;
+    fn GetWindowRect(window: Hwnd, rect: *mut Rect) -> i32;
+    fn SetCursorPos(x: i32, y: i32) -> i32;
 }
 #[link(name = "gdi32")]
 extern "system" {
@@ -155,6 +163,7 @@ struct AppState {
     yaw: f32,
     pitch: f32,
     mouse: Option<(i32, i32)>,
+    cursor_locked: bool,
 }
 
 fn wide(text: &str) -> Vec<u16> {
@@ -189,12 +198,12 @@ unsafe extern "system" fn window_proc(
                     hdc,
                     0,
                     0,
-                    320,
-                    200,
+                    FRAME_WIDTH,
+                    FRAME_HEIGHT,
                     0,
                     0,
-                    320,
-                    200,
+                    FRAME_WIDTH,
+                    FRAME_HEIGHT,
                     pixels.as_ptr() as *const c_void,
                     info,
                     DIB_RGB_COLORS,
@@ -223,9 +232,12 @@ unsafe extern "system" fn window_proc(
             if let Some(app) = APP.as_mut() {
                 let x = (lparam as u32 & 0xffff) as i16 as i32;
                 let y = ((lparam as u32 >> 16) & 0xffff) as i16 as i32;
-                if let Some((last_x, last_y)) = app.mouse {
-                    app.yaw += (x - last_x) as f32 * 0.006;
-                    app.pitch = (app.pitch - (y - last_y) as f32 * 0.006).clamp(-1.45, 1.45);
+                if app.cursor_locked {
+                    if let Some((last_x, last_y)) = app.mouse {
+                        app.yaw += (x - last_x) as f32 * 0.006;
+                        app.pitch = (app.pitch - (y - last_y) as f32 * 0.006).clamp(-1.45, 1.45);
+                    }
+                    lock_cursor(window);
                 }
                 app.mouse = Some((x, y));
             }
@@ -233,9 +245,22 @@ unsafe extern "system" fn window_proc(
         }
         WM_KEYDOWN | WM_KEYUP => {
             if let Some(app) = APP.as_mut() {
+                if wparam as u32 == VK_ESCAPE && message == WM_KEYDOWN {
+                    app.cursor_locked = false;
+                    ClipCursor(null());
+                    ShowCursor(1);
+                }
                 if let Some(key) = key_for(wparam as u32) {
                     app.input.set(key, message == WM_KEYDOWN);
                 }
+            }
+            0
+        }
+        WM_LBUTTONDOWN => {
+            if let Some(app) = APP.as_mut() {
+                app.cursor_locked = true;
+                ShowCursor(0);
+                lock_cursor(window);
             }
             0
         }
@@ -259,6 +284,21 @@ fn key_for(key: u32) -> Option<InputKey> {
     }
 }
 
+unsafe fn lock_cursor(window: Hwnd) {
+    let mut rect = Rect {
+        left: 0,
+        top: 0,
+        right: 0,
+        bottom: 0,
+    };
+    if GetWindowRect(window, &mut rect) != 0 {
+        let center_x = (rect.left + rect.right) / 2;
+        let center_y = (rect.top + rect.bottom) / 2;
+        SetCursorPos(center_x, center_y);
+        ClipCursor(&rect);
+    }
+}
+
 pub fn run() {
     unsafe {
         APP = Some(AppState {
@@ -267,6 +307,7 @@ pub fn run() {
             yaw: -2.16,
             pitch: -0.4,
             mouse: None,
+            cursor_locked: true,
         });
         FRAME = Some(build_frame(Camera::default()));
     }
@@ -294,8 +335,8 @@ pub fn run() {
             WS_OVERLAPPEDWINDOW,
             100,
             100,
-            960,
-            640,
+            FRAME_WIDTH,
+            FRAME_HEIGHT,
             null_mut(),
             null_mut(),
             instance,
@@ -304,6 +345,8 @@ pub fn run() {
         SetTimer(window, TIMER_ID, 33, null_mut());
         ShowWindow(window, SW_SHOW);
         UpdateWindow(window);
+        ShowCursor(0);
+        lock_cursor(window);
         let mut message = Message {
             hwnd: null_mut(),
             message: 0,
@@ -368,8 +411,8 @@ fn build_frame(camera: Camera) -> (Vec<u8>, BitmapInfo) {
         &camera,
         &materials,
         DirectionalLight::default(),
-        320,
-        200,
+        FRAME_WIDTH as u32,
+        FRAME_HEIGHT as u32,
     )
     .unwrap();
     let pixels = frame
@@ -380,8 +423,8 @@ fn build_frame(camera: Camera) -> (Vec<u8>, BitmapInfo) {
     let info = BitmapInfo {
         header: BitmapInfoHeader {
             size: size_of::<BitmapInfoHeader>() as u32,
-            width: 320,
-            height: -200,
+            width: FRAME_WIDTH,
+            height: -FRAME_HEIGHT,
             planes: 1,
             bit_count: 32,
             compression: 0,
