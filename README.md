@@ -1,32 +1,25 @@
-# Rustcraft
+# Voxel Engine
 
-Rustcraft is a small Rust utility that starts a user-configured Minecraft Java command immediately. It is intentionally not a game launcher, account manager, downloader, entitlement bypass, or distribution of Minecraft files.
+Voxel Engine is a clean-room Rust project for building an original voxel game engine. It is not a Minecraft launcher, client, mod, or distribution of Minecraft.
 
-## Quick start
+## Scope
 
-1. Install Rust.
-2. Copy `rustcraft.conf.example` to `rustcraft.conf`.
-3. Set `executable=` to the command or executable you already use, and `args=` to its arguments.
-4. Run `cargo run --release`.
+The roadmap covers original implementations of rendering, world/chunk storage and streaming, meshing, lighting, entities, collision, deterministic simulation, networking, resource formats, and developer tooling.
 
-Use `RUSTCRAFT_CONFIG` or `--config path/to/file` for a configuration outside the repository. The example uses `java -version` as a harmless smoke test; replace it with your own, already-authorized game command.
+The current `0.1.0` build is only a tested foundation: chunk storage, entity primitives, resource manifests, and a protocol-neutral session boundary.
 
-## Fabric trigger mode
+## Compatibility boundary
 
-The `fabric-trigger-mod` source scaffold lets a client-only Fabric mod trigger Rustcraft over loopback. Start Rustcraft with `--listen --config rustcraft.conf`, or run `start-rustcraft-listener.cmd` on Windows. Install the built mod in the Fabric instance, then open Minecraft Controls and assign `Rustcraft: Launch` to `J` (the default Minecraft binding may be `Home`) before pressing it in-game. The listener binds only to `127.0.0.1:39281` and requires a local token. It never handles Minecraft credentials.
+This project contains no Minecraft source, decompiled code, proprietary assets, authentication bypasses, or copied protocol implementation. It does not currently connect to ordinary Minecraft servers and makes no claim of vanilla parity.
 
-## Scope and provenance
+“100% vanilla parity” is an acceptance target requiring exhaustive independent testing and legal review; it cannot be promised in advance. Any future compatibility work must use public specifications, independently authored tests, and user-owned environments.
 
-This project is a clean-room implementation. Horizon was inspected only for publicly documented behavior, repository structure, and license obligations. No Horizon source is included in this baseline. Horizon is MIT-licensed; if compatible code is later reused, its copyright and license notice will be retained in `THIRD_PARTY_NOTICES.md` and the exact source will be recorded in the decision log.
-
-Rustcraft does not bypass Microsoft/Mojang authentication, ownership checks, paid access, or server rules. Users remain responsible for complying with Minecraft's terms and for supplying their own installation and command.
-
-## Development
+## Build
 
 ```text
 cargo fmt --check
 cargo test
-cargo run -- --help
+cargo run --release
 ```
 
-Releases use `vMAJOR.MINOR.PATCH` tags. Small, focused commits are preferred; generated binaries, game data, credentials, and local configs are ignored.
+Generated builds, local caches, game data, credentials, and external source checkouts are excluded from Git.

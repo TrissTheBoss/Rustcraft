@@ -1,9 +1,16 @@
 [package]
-name = "rustcraft"
+name = "voxel-engine"
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
-description = "A minimal, user-configured Minecraft Java starter"
+description = "A clean-room Rust voxel engine foundation"
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "voxel-engine"
+path = "src/main.rs"
 
 [profile.release]
 opt-level = 3
@@ -11,7 +18,3 @@ lto = "thin"
 codegen-units = 1
 strip = true
 panic = "abort"
-
-[[bin]]
-name = "rustcraft"
-path = "src/main.rs"

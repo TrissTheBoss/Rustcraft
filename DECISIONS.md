@@ -1,13 +1,17 @@
-# Decision log
+# Architecture decisions
 
-## 2026-11-05 — Baseline scope
+## 2026-11-06 — Replace launcher product with clean-room engine
 
-The request was narrowed to a legal, auditable instant-start utility. Paywall removal, cracked/offline entitlement bypass, credential theft, and copying proprietary code are out of scope. The first implementation accepts an explicit executable and arguments so it can launch an installation the user already owns and configures.
+Rustcraft launcher and Fabric-trigger code were removed from the active tree after the product direction changed. Git history remains intact for auditability; the active product is now Voxel Engine.
 
-## 2026-11-05 — Horizon review
+## 2026-11-06 — No copied Minecraft implementation
 
-The public Horizon repository states that it is MIT licensed, unofficial, contains no Minecraft assets/data, and requires a Microsoft account that owns Java Edition. Those constraints are preserved. No Horizon source was copied into v0.1.0.
+The engine uses original code, original assets, and independently authored specifications. Existing Minecraft code, proprietary assets, authentication systems, and copied protocol implementations are out of scope.
 
-## 2026-11-05 — Performance
+## 2026-11-06 — Compatibility is a gated research track
 
-The starter uses Rust's standard process API, has no background service, no network requests, no polling loop, and no runtime dependencies. Future work should measure startup time before adding UI, update checks, or telemetry.
+Ordinary Minecraft-server compatibility and complete vanilla parity are not current features. They require public-specification study, legal review, conformance tests, and explicit evidence before any claim.
+
+## 2026-11-06 — Foundation before renderer
+
+The first implementation establishes testable world, entity, resource, and networking boundaries before selecting a renderer or platform abstraction.

@@ -3,5 +3,5 @@
 version = 4
 
 [[package]]
-name = "rustcraft"
+name = "voxel-engine"
 version = "0.1.0"
