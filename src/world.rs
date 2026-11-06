@@ -4,7 +4,7 @@ use std::io::{self, Read, Write};
 pub const CHUNK_SIZE: usize = 16;
 pub const CHUNK_VOLUME: usize = CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE;
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, Ord, PartialEq, PartialOrd)]
 pub struct BlockId(pub u16);
 
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]

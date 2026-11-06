@@ -6,7 +6,7 @@ Voxel Engine is a clean-room Rust project for building an original voxel game en
 
 The roadmap covers original implementations of rendering, world/chunk storage and streaming, meshing, lighting, entities, collision, deterministic simulation, networking, resource formats, and developer tooling.
 
-The current `0.4.0` build contains the world foundation, deterministic fixed-step simulation with voxel collision queries and replay snapshots, and a dependency-free CPU rendering pipeline. On Windows, running the binary opens a native prototype window displaying the generated voxel scene; non-Windows builds retain the headless metrics demo. It does not yet provide player input, a GPU backend, or a complete game loop.
+The current `0.5.0` build contains the world foundation, deterministic terrain generation, fixed-step simulation with voxel collision queries and replay snapshots, and a dependency-free CPU rendering pipeline. On Windows, running the binary opens a native prototype window displaying generated layered terrain; non-Windows builds retain the headless metrics demo. It does not yet provide original texture packs, a GPU backend, or a complete game loop.
 
 ## Compatibility boundary
 
@@ -59,6 +59,8 @@ Simulation implementation status: `src/simulation.rs` provides a fixed-step cloc
 Rendering implementation status: the CPU pipeline is implemented in `src/render.rs`, and `src/window.rs` provides a decorated native Windows window sized to the primary monitor with a 30 Hz update loop. Mouse deltas are measured from the window center, so recentering no longer cancels camera movement. The cursor is hidden while captured; Escape releases it and clicking captures it again. W/A/S/D move the camera, Space moves up, and Ctrl moves down. GPU presentation and a complete game loop remain pending.
 
 ### v0.5 — Developer tooling
+
+Terrain implementation status: `src/terrain.rs` generates deterministic seeded chunks with varied surface, soil, and rock layers. These are original engine blocks and procedural colors; Minecraft-owned textures and assets are intentionally not included.
 
 - Add a world inspector and chunk visualizer.
 - Add resource validation and format conversion tools.

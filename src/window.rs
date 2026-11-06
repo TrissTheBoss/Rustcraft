@@ -9,7 +9,8 @@ use crate::render::{
     mesh_chunk, Camera, CpuRenderer, DirectionalLight, InputKey, InputState, Material,
     MaterialRegistry, Renderer, Vec3,
 };
-use crate::world::{BlockId, ChunkPos, World, CHUNK_SIZE};
+use crate::terrain::{TerrainGenerator, ROCK, SOIL, SURFACE};
+use crate::world::{BlockId, ChunkPos, World};
 
 type Hinstance = *mut c_void;
 type Hwnd = *mut c_void;
@@ -369,16 +370,9 @@ pub fn run() {
 
 fn build_frame(camera: Camera, width: u32, height: u32) -> (Vec<u8>, BitmapInfo) {
     let mut world = World::new();
+    let generated = TerrainGenerator::default().generate_chunk(ChunkPos { x: 0, y: 0, z: 0 });
     let chunk = world.get_or_create_chunk(ChunkPos { x: 0, y: 0, z: 0 });
-    for y in 0..4 {
-        for z in 0..CHUNK_SIZE {
-            for x in 0..CHUNK_SIZE {
-                chunk
-                    .set(x, y, z, BlockId(if y == 3 { 2 } else { 1 }))
-                    .unwrap();
-            }
-        }
-    }
+    *chunk = generated;
     let mesh = mesh_chunk(chunk, |x, y, z| {
         x >= 0
             && y >= 0
@@ -391,7 +385,7 @@ fn build_frame(camera: Camera, width: u32, height: u32) -> (Vec<u8>, BitmapInfo)
     let mut materials = MaterialRegistry::default();
     materials
         .register(
-            BlockId(1),
+            SOIL,
             Material {
                 color: [110, 160, 86],
                 texture: None,
@@ -400,9 +394,18 @@ fn build_frame(camera: Camera, width: u32, height: u32) -> (Vec<u8>, BitmapInfo)
         .unwrap();
     materials
         .register(
-            BlockId(2),
+            SURFACE,
             Material {
                 color: [150, 105, 66],
+                texture: None,
+            },
+        )
+        .unwrap();
+    materials
+        .register(
+            ROCK,
+            Material {
+                color: [106, 106, 112],
                 texture: None,
             },
         )
