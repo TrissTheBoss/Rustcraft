@@ -8,6 +8,7 @@ This log records material repository actions, results, decisions, and next steps
 - Removed tracked launcher configuration, startup script, Fabric trigger project, and obsolete Cargo lockfile. Result: the active tree no longer presents a Minecraft launcher or mod as the product. Next: add original engine boundaries and documentation.
 - Added original world/chunk storage, entity primitives, protocol-neutral session state, resource manifest types, and a minimal executable. Next: add deterministic simulation tests, renderer selection, and tooling interfaces.
 - Documented the compatibility boundary: no Minecraft code/assets are included, and ordinary-server compatibility plus 100% parity are future acceptance targets rather than current claims.
+- Expanded the roadmap into staged milestones from headless world core through simulation, rendering, tooling, original multiplayer, and release gates. Began `v0.2` implementation with world/chunk coordinates, a world manager, and dependency-free persistence. Next: finish the world core and its round-trip tests.
 
 ## Documentation procedure
 

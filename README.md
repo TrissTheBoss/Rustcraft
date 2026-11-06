@@ -23,3 +23,47 @@ cargo run --release
 ```
 
 Generated builds, local caches, game data, credentials, and external source checkouts are excluded from Git.
+
+## Detailed roadmap
+
+### v0.2 — Headless world core
+
+- Define stable world and chunk coordinates.
+- Add a world manager with lazy chunk creation and unload support.
+- Add block registry boundaries and safe block mutation APIs.
+- Implement deterministic, dependency-free chunk persistence.
+- Add round-trip, bounds, and deterministic update tests.
+
+### v0.3 — Deterministic simulation
+
+- Add a fixed-timestep clock.
+- Add entity storage, lifecycle, transforms, and collision primitives.
+- Add gravity and movement integration.
+- Add deterministic replay fixtures and simulation regression tests.
+
+### v0.4 — Rendering foundation
+
+- Select and document the window/GPU stack, initially evaluating `wgpu`.
+- Add input, camera, frame scheduling, and renderer abstraction layers.
+- Add chunk meshing, face culling, texture/resource loading, and basic lighting.
+- Add frame-time and memory profiling before optimization decisions.
+
+### v0.5 — Developer tooling
+
+- Add a world inspector and chunk visualizer.
+- Add resource validation and format conversion tools.
+- Add replay capture, debug overlays, crash reports, and benchmark commands.
+
+### v0.6 — Original multiplayer
+
+- Specify an original client/server protocol.
+- Add authoritative server simulation and client prediction boundaries.
+- Add authentication and transport security for the new engine only.
+- Build compatibility tests against the engine's own server.
+
+### v1.0 — Release gate
+
+- Cross-platform builds and QA.
+- Performance benchmarks with published hardware/configuration.
+- Security and persistence review.
+- Documented compatibility evidence; no parity claim without exhaustive testing.
