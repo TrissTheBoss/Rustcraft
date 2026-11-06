@@ -10,7 +10,7 @@ This log records material repository actions, results, decisions, and next steps
 - Documented the compatibility boundary: no Minecraft code/assets are included, and ordinary-server compatibility plus 100% parity are future acceptance targets rather than current claims.
 - Expanded the roadmap into staged milestones from headless world core through simulation, rendering, tooling, original multiplayer, and release gates. Began `v0.2` implementation with world/chunk coordinates, a world manager, and dependency-free persistence. Next: finish the world core and its round-trip tests.
 - Documented this conversation's durable project context in `CONVERSATION_MEMORY.md` and added `AGENTS.md` with clean-room, honesty, verification, documentation, handoff, and release rules. Result: future agents have repository-local instructions, while the file explicitly states that it cannot override higher-priority system or user instructions. Next: keep these files synchronized as the engine evolves.
-- Added Hermes workflow scaffolding: separate terminal front end, hidden worker process, Codex CLI delegation, repository-local system contract, context-reduction guidance, GitHub Actions Rust CI, startup script, and Windows shortcut installer. Result: Hermes can use the locally authenticated Codex CLI without handling ChatGPT credentials itself. Next: run `codex login`, start Hermes, and verify one harmless repository-status request.
+- Hermes tooling was requested but is intentionally maintained outside this repository. The active repository contains no Hermes runtime, skills, pipeline, shortcut, or context files. Next: maintain the external Hermes directory separately from the engine source tree.
 
 ## Documentation procedure
 
