@@ -5,7 +5,7 @@ use std::ffi::c_void;
 use std::mem::size_of;
 use std::ptr::{null, null_mut};
 
-use crate::grid::PLAYER_EYE_HEIGHT;
+use crate::grid::PLAYER_EYE_OFFSET;
 use crate::logger::Logger;
 use crate::movement::{GameMode, MovementInput, PlayerController};
 use crate::render::{
@@ -297,7 +297,7 @@ unsafe extern "system" fn window_proc(
                     SetWindowTextW(window, title.as_ptr());
                     app.camera.position = Vec3::new(
                         app.player.transform.x as f32,
-                        (app.player.transform.y + PLAYER_EYE_HEIGHT) as f32,
+                        (app.player.transform.y + PLAYER_EYE_OFFSET) as f32,
                         app.player.transform.z as f32,
                     );
                 }

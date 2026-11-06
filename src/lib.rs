@@ -17,7 +17,16 @@ pub const ENGINE_NAME: &str = "Voxel Engine";
 
 #[cfg(test)]
 mod tests {
+    use super::grid::{PLAYER_EYE_HEIGHT, PLAYER_EYE_OFFSET, PLAYER_HALF_HEIGHT, PLAYER_HEIGHT};
     use super::world::{BlockId, Chunk, ChunkPos, World, CHUNK_SIZE};
+
+    #[test]
+    fn player_body_and_eye_share_the_same_height_reference() {
+        assert_eq!(PLAYER_HEIGHT, 1.8);
+        assert_eq!(PLAYER_HALF_HEIGHT, 0.9);
+        assert_eq!(PLAYER_EYE_HEIGHT, 1.62);
+        assert_eq!(PLAYER_EYE_OFFSET + PLAYER_HALF_HEIGHT, PLAYER_EYE_HEIGHT);
+    }
 
     #[test]
     fn chunks_have_stable_bounds() {
