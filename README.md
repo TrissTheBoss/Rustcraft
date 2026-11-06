@@ -22,6 +22,8 @@ cargo test
 cargo run --release
 ```
 
+For repeatable local testing, run `.uild-release.ps1`; it refreshes `target/release/voxel-engine.exe`. The executable is generated output and remains intentionally excluded from Git.
+
 The release command executes the headless prototype scene and does not write world or build data.
 
 For a local, user-owned Java client JAR, run `cargo run --release -- --extract-assets [path-to-client.jar]`. If no path is supplied, the utility searches the platform's default `.minecraft` location, including the Linux Flatpak location, and extracts only block textures, block `.png.mcmeta` files, and item textures into the ignored `assets/extracted/` directory. The source JAR is read-only and no network access occurs during extraction.
