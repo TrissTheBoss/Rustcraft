@@ -7,7 +7,7 @@ use std::ptr::{null, null_mut};
 
 use crate::logger::Logger;
 use crate::render::{
-    mesh_chunk, Camera, CpuRenderer, DirectionalLight, InputKey, InputState, Material,
+    greedy_mesh_chunk, Camera, CpuRenderer, DirectionalLight, InputKey, InputState, Material,
     MaterialRegistry, Mesh, Renderer, Vec3,
 };
 use crate::terrain::{TerrainGenerator, ROCK, SOIL, SURFACE};
@@ -421,7 +421,7 @@ fn build_frame(camera: Camera, width: u32, height: u32) -> (Vec<u8>, BitmapInfo)
         for x in -2..=2 {
             let position = ChunkPos { x, y: 0, z };
             let chunk = world.get_chunk(position).unwrap();
-            let mut mesh = mesh_chunk(chunk, |local_x, local_y, local_z| {
+            let mut mesh = greedy_mesh_chunk(chunk, |local_x, local_y, local_z| {
                 let neighbor = ChunkPos {
                     x: position.x + local_x.div_euclid(CHUNK_SIZE as i32),
                     y: position.y + local_y.div_euclid(CHUNK_SIZE as i32),
@@ -438,6 +438,7 @@ fn build_frame(camera: Camera, width: u32, height: u32) -> (Vec<u8>, BitmapInfo)
                 vertex.position.x += (x * CHUNK_SIZE as i32) as f32;
                 vertex.position.z += (z * CHUNK_SIZE as i32) as f32;
             }
+            mesh.recalculate_bounds();
             meshes.push(mesh);
         }
     }

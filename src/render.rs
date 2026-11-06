@@ -147,6 +147,7 @@ pub struct Camera {
     pub vertical_fov_radians: f32,
     pub near: f32,
     pub far: f32,
+    pub fov_degrees: f32,
 }
 
 impl Default for Camera {
@@ -158,6 +159,7 @@ impl Default for Camera {
             vertical_fov_radians: 1.047_197_6,
             near: 0.1,
             far: 512.0,
+            fov_degrees: 60.0,
         }
     }
 }
@@ -165,7 +167,7 @@ impl Default for Camera {
 impl Camera {
     pub fn view_projection(&self, aspect: f32) -> Result<Mat4, &'static str> {
         Ok(
-            Mat4::perspective(self.vertical_fov_radians, aspect, self.near, self.far)?
+            Mat4::perspective(self.fov_degrees.to_radians(), aspect, self.near, self.far)?
                 .mul(Mat4::look_at(self.position, self.target, self.up)?),
         )
     }
@@ -323,6 +325,8 @@ pub struct Vertex {
 pub struct Mesh {
     pub vertices: Vec<Vertex>,
     pub indices: Vec<u32>,
+    pub bounds_min: Vec3,
+    pub bounds_max: Vec3,
 }
 
 impl Mesh {
@@ -335,6 +339,22 @@ impl Mesh {
     pub fn byte_len(&self) -> usize {
         self.vertices.len() * std::mem::size_of::<Vertex>()
             + self.indices.len() * std::mem::size_of::<u32>()
+    }
+
+    pub fn recalculate_bounds(&mut self) {
+        if self.vertices.is_empty() {
+            return;
+        }
+        self.bounds_min = self.vertices[0].position;
+        self.bounds_max = self.vertices[0].position;
+        for vertex in &self.vertices[1..] {
+            self.bounds_min.x = self.bounds_min.x.min(vertex.position.x);
+            self.bounds_min.y = self.bounds_min.y.min(vertex.position.y);
+            self.bounds_min.z = self.bounds_min.z.min(vertex.position.z);
+            self.bounds_max.x = self.bounds_max.x.max(vertex.position.x);
+            self.bounds_max.y = self.bounds_max.y.max(vertex.position.y);
+            self.bounds_max.z = self.bounds_max.z.max(vertex.position.z);
+        }
     }
 }
 
@@ -382,7 +402,140 @@ pub fn mesh_chunk(chunk: &Chunk, mut is_solid: impl FnMut(i32, i32, i32) -> bool
             }
         }
     }
+    mesh.recalculate_bounds();
     mesh
+}
+
+/// Greedy meshing merges adjacent exposed faces with the same block ID.
+/// UVs scale with the merged rectangle, preserving repeatable texture sampling.
+pub fn greedy_mesh_chunk(chunk: &Chunk, mut is_solid: impl FnMut(i32, i32, i32) -> bool) -> Mesh {
+    let mut mesh = Mesh::default();
+    for face in Face::ALL {
+        for layer in 0..CHUNK_SIZE {
+            let mut mask = [[None; CHUNK_SIZE]; CHUNK_SIZE];
+            for v in 0..CHUNK_SIZE {
+                for u in 0..CHUNK_SIZE {
+                    let (x, y, z) = face_cell(face, layer, u, v);
+                    let block = chunk.get(x, y, z).unwrap();
+                    let o = face.offset();
+                    if block != BlockId(0)
+                        && !is_solid(x as i32 + o[0], y as i32 + o[1], z as i32 + o[2])
+                    {
+                        mask[v][u] = Some(block);
+                    }
+                }
+            }
+            let mut v = 0;
+            while v < CHUNK_SIZE {
+                let mut u = 0;
+                while u < CHUNK_SIZE {
+                    let Some(block) = mask[v][u] else {
+                        u += 1;
+                        continue;
+                    };
+                    let mut width = 1;
+                    while u + width < CHUNK_SIZE && mask[v][u + width] == Some(block) {
+                        width += 1;
+                    }
+                    let mut height = 1;
+                    'height: while v + height < CHUNK_SIZE {
+                        for x in u..u + width {
+                            if mask[v + height][x] != Some(block) {
+                                break 'height;
+                            }
+                        }
+                        height += 1;
+                    }
+                    add_quad(&mut mesh, face, layer, u, v, width, height, block);
+                    for row in v..v + height {
+                        for x in u..u + width {
+                            mask[row][x] = None;
+                        }
+                    }
+                    u += width;
+                }
+                v += 1;
+            }
+        }
+    }
+    mesh.recalculate_bounds();
+    mesh
+}
+
+fn face_cell(face: Face, layer: usize, u: usize, v: usize) -> (usize, usize, usize) {
+    match face {
+        Face::NegativeX | Face::PositiveX => (layer, v, u),
+        Face::NegativeY | Face::PositiveY => (u, layer, v),
+        Face::NegativeZ | Face::PositiveZ => (u, v, layer),
+    }
+}
+
+fn add_quad(
+    mesh: &mut Mesh,
+    face: Face,
+    layer: usize,
+    u: usize,
+    v: usize,
+    width: usize,
+    height: usize,
+    block: BlockId,
+) {
+    let (x, y, z) = face_cell(face, layer, u, v);
+    let (x, y, z) = (x as f32, y as f32, z as f32);
+    let w = width as f32;
+    let h = height as f32;
+    let points = match face {
+        Face::NegativeX => [
+            Vec3::new(x, y, z),
+            Vec3::new(x, y + h, z),
+            Vec3::new(x, y + h, z + w),
+            Vec3::new(x, y, z + w),
+        ],
+        Face::PositiveX => [
+            Vec3::new(x + 1.0, y, z + w),
+            Vec3::new(x + 1.0, y + h, z + w),
+            Vec3::new(x + 1.0, y + h, z),
+            Vec3::new(x + 1.0, y, z),
+        ],
+        Face::NegativeY => [
+            Vec3::new(x, y, z + h),
+            Vec3::new(x, y, z),
+            Vec3::new(x + w, y, z),
+            Vec3::new(x + w, y, z + h),
+        ],
+        Face::PositiveY => [
+            Vec3::new(x, y + 1.0, z),
+            Vec3::new(x, y + 1.0, z + h),
+            Vec3::new(x + w, y + 1.0, z + h),
+            Vec3::new(x + w, y + 1.0, z),
+        ],
+        Face::NegativeZ => [
+            Vec3::new(x + w, y, z),
+            Vec3::new(x, y, z),
+            Vec3::new(x, y + h, z),
+            Vec3::new(x + w, y + h, z),
+        ],
+        Face::PositiveZ => [
+            Vec3::new(x, y, z + 1.0),
+            Vec3::new(x + w, y, z + 1.0),
+            Vec3::new(x + w, y + h, z + 1.0),
+            Vec3::new(x, y + h, z + 1.0),
+        ],
+    };
+    let first = mesh.vertices.len() as u32;
+    for (point, uv) in points
+        .into_iter()
+        .zip([[0.0, 0.0], [0.0, h], [w, h], [w, 0.0]])
+    {
+        mesh.vertices.push(Vertex {
+            position: point,
+            normal: face.normal(),
+            block,
+            uv,
+        });
+    }
+    mesh.indices
+        .extend_from_slice(&[first, first + 1, first + 2, first, first + 2, first + 3]);
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -662,6 +815,9 @@ impl Renderer for CpuRenderer {
         let mut frame = Frame::new(width, height, self.clear_color)?;
         let matrix = camera.view_projection(width as f32 / height as f32)?;
         for mesh in meshes {
+            if !mesh_visible(mesh, matrix) {
+                continue;
+            }
             for triangle in mesh.indices.chunks_exact(3) {
                 let vertices = [
                     mesh.vertices[triangle[0] as usize],
@@ -686,6 +842,25 @@ impl Renderer for CpuRenderer {
         }
         Ok(frame)
     }
+}
+
+fn mesh_visible(mesh: &Mesh, matrix: Mat4) -> bool {
+    if mesh.vertices.is_empty() {
+        return false;
+    }
+    let center = (mesh.bounds_min + mesh.bounds_max) * 0.5;
+    let radius = (mesh.bounds_max - center).length();
+    let clip = matrix.transform([center.x, center.y, center.z, 1.0]);
+    if !clip.iter().all(|value| value.is_finite()) || clip[3] <= 0.0 {
+        return false;
+    }
+    let margin = radius * 1.8;
+    clip[0] >= -clip[3] - margin
+        && clip[0] <= clip[3] + margin
+        && clip[1] >= -clip[3] - margin
+        && clip[1] <= clip[3] + margin
+        && clip[2] >= -margin
+        && clip[2] <= clip[3] + margin
 }
 
 fn raster_triangle(
@@ -865,6 +1040,30 @@ mod tests {
         });
         assert_eq!(mesh.triangle_count(), 20);
         assert_eq!(mesh.vertices.len(), 40);
+    }
+
+    #[test]
+    fn greedy_mesher_merges_a_flat_surface() {
+        let mut chunk = Chunk::empty();
+        for z in 0..4 {
+            for x in 0..4 {
+                chunk.set(x, 0, z, BlockId(1)).unwrap();
+            }
+        }
+        let mesh = greedy_mesh_chunk(&chunk, |x, y, z| {
+            x >= 0 && y >= 0 && z >= 0 && x < 4 && y < 1 && z < 4
+        });
+        assert!(mesh.triangle_count() < 4 * 4 * 6);
+        assert_eq!(mesh.triangle_count(), 6 * 2);
+        assert_eq!(mesh.vertices[0].block, BlockId(1));
+    }
+
+    #[test]
+    fn camera_fov_is_explicit_and_configurable() {
+        let mut camera = Camera::default();
+        assert_eq!(camera.fov_degrees, 60.0);
+        camera.fov_degrees = 90.0;
+        assert!(camera.view_projection(16.0 / 9.0).is_ok());
     }
 
     #[test]
