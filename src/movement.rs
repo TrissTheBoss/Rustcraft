@@ -16,6 +16,8 @@ pub const JUMP_IMPULSE: f64 = 0.42;
 pub const FLIGHT_ACCELERATION: f64 = 0.049;
 pub const FLIGHT_SPEED_MULTIPLIER: f64 = 2.0;
 pub const STEP_HEIGHT: f64 = PLAYER_STEP_HEIGHT;
+pub const WALK_SPEED_PER_TICK: f64 = 4.317 / TICKS_PER_SECOND;
+pub const SPRINT_SPEED_PER_TICK: f64 = 5.612 / TICKS_PER_SECOND;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum GameMode {
@@ -114,6 +116,17 @@ impl PlayerController {
             };
             self.velocity[0] *= friction;
             self.velocity[2] *= friction;
+            let maximum = if input.sprint {
+                SPRINT_SPEED_PER_TICK
+            } else {
+                WALK_SPEED_PER_TICK
+            };
+            let horizontal_speed = self.velocity[0].hypot(self.velocity[2]);
+            if horizontal_speed > maximum {
+                let scale = maximum / horizontal_speed;
+                self.velocity[0] *= scale;
+                self.velocity[2] *= scale;
+            }
         }
         move_axis(self, 0, &is_solid);
         move_axis(self, 2, &is_solid);
@@ -308,5 +321,27 @@ mod tests {
             );
         }
         assert!(player.transform.x > 2.0);
+    }
+
+    #[test]
+    fn airborne_horizontal_speed_does_not_accumulate_unboundedly() {
+        let mut player = PlayerController::new(Transform {
+            x: 0.5,
+            y: 1.9,
+            z: 0.5,
+        });
+        player.grounded = true;
+        for tick in 0..80 {
+            player.tick(
+                MovementInput {
+                    forward: 1.0,
+                    jump: tick == 0,
+                    ..Default::default()
+                },
+                0.0,
+                |_, y, _| y == 0,
+            );
+        }
+        assert!(player.velocity[0] <= WALK_SPEED_PER_TICK + 1.0e-9);
     }
 }

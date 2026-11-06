@@ -6,7 +6,7 @@ Voxel Engine is a clean-room Rust project for building an original voxel game en
 
 The roadmap covers original implementations of rendering, world/chunk storage and streaming, meshing, lighting, entities, collision, deterministic simulation, networking, resource formats, and developer tooling.
 
-The current `0.8.7` build contains the world foundation, deterministic terrain generation, a Java Edition 26.3-targeted movement controller wired into the Windows player loop, fixed-step simulation with voxel collision queries and replay snapshots, and an optimized dependency-free CPU rendering pipeline. Movement advances at 20 Hz, uses explicit 16-block chunk/grid coordinates, supports one-block jump clearance, and logs player position/velocity/grounding each tick for diagnostics.
+The current `0.8.8` build contains the world foundation, deterministic terrain generation, a Java Edition 26.3-targeted movement controller wired into the Windows player loop, fixed-step simulation with voxel collision queries and replay snapshots, and an optimized dependency-free CPU rendering pipeline. Movement advances at 20 Hz, uses explicit 16-block chunk/grid coordinates, supports one-block jump clearance, and caps airborne horizontal speed to prevent momentum accumulation.
 
 ## Compatibility boundary
 
