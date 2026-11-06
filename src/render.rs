@@ -181,6 +181,7 @@ pub enum InputKey {
     Right,
     Up,
     Down,
+    Sprint,
 }
 
 #[derive(Clone, Debug, Default)]

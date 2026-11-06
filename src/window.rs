@@ -6,6 +6,7 @@ use std::mem::size_of;
 use std::ptr::{null, null_mut};
 
 use crate::logger::Logger;
+use crate::movement::{GameMode, MovementInput, PlayerController};
 use crate::render::{
     greedy_mesh_chunk, Camera, CpuRenderer, DirectionalLight, InputKey, InputState, Material,
     MaterialRegistry, Mesh, Renderer, Vec3,
@@ -166,6 +167,7 @@ static mut APP: Option<AppState> = None;
 static mut SCENE: Option<Scene> = None;
 
 struct Scene {
+    world: crate::world::World,
     meshes: Vec<Mesh>,
     materials: MaterialRegistry,
 }
@@ -181,6 +183,7 @@ struct AppState {
     render_width: u32,
     render_height: u32,
     logger: Logger,
+    player: PlayerController,
 }
 
 fn wide(text: &str) -> Vec<u16> {
@@ -241,7 +244,37 @@ unsafe extern "system" fn window_proc(
         WM_TIMER if wparam == TIMER_ID => {
             if let Some(app) = APP.as_mut() {
                 app.logger.event("TRACE", "timer_tick", "interval_ms=33");
-                app.input.move_camera(&mut app.camera, 1.0 / 30.0, 8.0);
+                if let Some(scene) = SCENE.as_ref() {
+                    let input = MovementInput {
+                        forward: app.input.is_pressed(InputKey::Forward) as i32 as f64
+                            - app.input.is_pressed(InputKey::Backward) as i32 as f64,
+                        strafe: app.input.is_pressed(InputKey::Right) as i32 as f64
+                            - app.input.is_pressed(InputKey::Left) as i32 as f64,
+                        jump: app.input.is_pressed(InputKey::Up),
+                        sneak: app.input.is_pressed(InputKey::Down),
+                        sprint: app.input.is_pressed(InputKey::Sprint),
+                        toggle_flight: false,
+                    };
+                    app.player.tick(input, app.yaw as f64, |x, y, z| {
+                        let position = ChunkPos {
+                            x: x.div_euclid(CHUNK_SIZE as i32),
+                            y: y.div_euclid(CHUNK_SIZE as i32),
+                            z: z.div_euclid(CHUNK_SIZE as i32),
+                        };
+                        let lx = x.rem_euclid(CHUNK_SIZE as i32) as usize;
+                        let ly = y.rem_euclid(CHUNK_SIZE as i32) as usize;
+                        let lz = z.rem_euclid(CHUNK_SIZE as i32) as usize;
+                        scene
+                            .world
+                            .get_chunk(position)
+                            .is_some_and(|chunk| chunk.get(lx, ly, lz).unwrap() != BlockId(0))
+                    });
+                    app.camera.position = Vec3::new(
+                        app.player.transform.x as f32,
+                        (app.player.transform.y + 1.62) as f32,
+                        app.player.transform.z as f32,
+                    );
+                }
                 let direction = Vec3::new(
                     app.pitch.cos() * app.yaw.cos(),
                     app.pitch.sin(),
@@ -338,6 +371,7 @@ fn key_for(key: u32) -> Option<InputKey> {
         0x44 => Some(InputKey::Right),
         0x20 => Some(InputKey::Up),
         0x11 => Some(InputKey::Down),
+        0x10 => Some(InputKey::Sprint),
         _ => None,
     }
 }
@@ -378,6 +412,15 @@ pub fn run(logger: Option<Logger>) {
             render_width: (width as u32).min(MAX_RENDER_WIDTH),
             render_height: (height as u32).min(MAX_RENDER_HEIGHT),
             logger: logger.unwrap_or_else(|| Logger::start("voxel-engine.log").expect("logger")),
+            player: {
+                let mut player = PlayerController::new(crate::entity::Transform {
+                    x: 8.0,
+                    y: 12.0,
+                    z: 8.0,
+                });
+                player.mode = GameMode::Survival;
+                player
+            },
         });
         if let Some(app) = APP.as_ref() {
             app.logger.event(
@@ -502,7 +545,11 @@ fn build_scene() -> Scene {
             },
         )
         .unwrap();
-    Scene { meshes, materials }
+    Scene {
+        world,
+        meshes,
+        materials,
+    }
 }
 
 fn build_frame(camera: Camera, width: u32, height: u32, scene: &Scene) -> (Vec<u8>, BitmapInfo) {

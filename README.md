@@ -6,7 +6,7 @@ Voxel Engine is a clean-room Rust project for building an original voxel game en
 
 The roadmap covers original implementations of rendering, world/chunk storage and streaming, meshing, lighting, entities, collision, deterministic simulation, networking, resource formats, and developer tooling.
 
-The current `0.8.0` build contains the world foundation, deterministic terrain generation, a Java Edition 26.3-targeted movement controller, fixed-step simulation with voxel collision queries and replay snapshots, and an optimized dependency-free CPU rendering pipeline. The movement controller covers versioned walking/sprinting acceleration, jumping, gravity, survival collision, creative flight, spectator flight, and configurable constants; it is a tested engine subsystem, not yet a claim of complete vanilla parity.
+The current `0.8.1` build contains the world foundation, deterministic terrain generation, a Java Edition 26.3-targeted movement controller wired into the Windows player loop, fixed-step simulation with voxel collision queries and replay snapshots, and an optimized dependency-free CPU rendering pipeline. The controller covers versioned walking/sprinting acceleration, jumping, gravity, survival collision, creative flight, spectator flight, and configurable constants; it is a tested engine subsystem, not yet a claim of complete vanilla parity.
 
 ## Compatibility boundary
 
@@ -68,7 +68,7 @@ Large-world rendering status: the prototype generates a bounded chunk region, me
 
 Performance status: greedy meshing merges coplanar faces with matching block IDs and scales UVs for repeated textures. Mesh bounds are tested against the camera frustum before rasterization. Terrain and meshes are cached instead of rebuilt every frame, and the CPU render buffer is capped at 960x600 before scaling to the native window. The CPU renderer remains a prototype and is not yet a substitute for GPU batching.
 
-Movement status: `src/movement.rs` pins the initial controller constants to Java Edition 26.3-style 20 Hz physics. Exact parity remains an evidence-driven compatibility target because public references document headline values but not every edge case, effect, block, or mode interaction.
+Movement status: `src/movement.rs` is wired to the Windows player loop. W/A/S/D drive the body, Shift sprints, Space jumps, Ctrl sneaks/descends, collision queries use generated chunks, and the camera follows the player eye. Exact parity remains an evidence-driven compatibility target because public references document headline values but not every edge case, effect, block, or mode interaction.
 
 - Add a world inspector and chunk visualizer.
 - Add resource validation and format conversion tools.
