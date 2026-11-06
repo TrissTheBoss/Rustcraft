@@ -6,7 +6,8 @@ use std::mem::size_of;
 use std::ptr::{null, null_mut};
 
 use crate::render::{
-    mesh_chunk, Camera, CpuRenderer, DirectionalLight, Material, MaterialRegistry, Renderer,
+    mesh_chunk, Camera, CpuRenderer, DirectionalLight, InputKey, InputState, Material,
+    MaterialRegistry, Renderer,
 };
 use crate::world::{BlockId, ChunkPos, World, CHUNK_SIZE};
 
@@ -20,12 +21,16 @@ type Lparam = isize;
 const WM_DESTROY: u32 = 0x0002;
 const WM_PAINT: u32 = 0x000F;
 const WM_ERASEBKGND: u32 = 0x0014;
+const WM_TIMER: u32 = 0x0113;
+const WM_KEYDOWN: u32 = 0x0100;
+const WM_KEYUP: u32 = 0x0101;
 const CS_HREDRAW: u32 = 0x0002;
 const CS_VREDRAW: u32 = 0x0001;
 const WS_OVERLAPPEDWINDOW: u32 = 0x00CF0000;
 const SW_SHOW: i32 = 5;
 const DIB_RGB_COLORS: u32 = 0;
 const SRCCOPY: u32 = 0x00CC0020;
+const TIMER_ID: usize = 1;
 
 #[repr(C)]
 struct Point {
@@ -108,6 +113,8 @@ extern "system" {
     fn EndPaint(window: Hwnd, paint: *const PaintStruct) -> i32;
     fn DefWindowProcW(window: Hwnd, message: u32, wparam: Wparam, lparam: Lparam) -> Lresult;
     fn PostQuitMessage(code: i32);
+    fn InvalidateRect(window: Hwnd, rect: *const Rect, erase: i32) -> i32;
+    fn SetTimer(window: Hwnd, id: usize, interval: u32, callback: *mut c_void) -> usize;
 }
 #[link(name = "gdi32")]
 extern "system" {
@@ -139,6 +146,12 @@ struct Message {
 }
 
 static mut FRAME: Option<(Vec<u8>, BitmapInfo)> = None;
+static mut APP: Option<AppState> = None;
+
+struct AppState {
+    camera: Camera,
+    input: InputState,
+}
 
 fn wide(text: &str) -> Vec<u16> {
     text.encode_utf16().chain(std::iter::once(0)).collect()
@@ -188,6 +201,22 @@ unsafe extern "system" fn window_proc(
             0
         }
         WM_ERASEBKGND => 1,
+        WM_TIMER if wparam == TIMER_ID => {
+            if let Some(app) = APP.as_mut() {
+                app.input.move_camera(&mut app.camera, 1.0 / 30.0, 8.0);
+                FRAME = Some(build_frame(app.camera));
+                InvalidateRect(window, null(), 0);
+            }
+            0
+        }
+        WM_KEYDOWN | WM_KEYUP => {
+            if let Some(app) = APP.as_mut() {
+                if let Some(key) = key_for(wparam as u32) {
+                    app.input.set(key, message == WM_KEYDOWN);
+                }
+            }
+            0
+        }
         WM_DESTROY => {
             PostQuitMessage(0);
             0
@@ -196,10 +225,25 @@ unsafe extern "system" fn window_proc(
     }
 }
 
+fn key_for(key: u32) -> Option<InputKey> {
+    match key {
+        0x57 => Some(InputKey::Forward),
+        0x53 => Some(InputKey::Backward),
+        0x41 => Some(InputKey::Left),
+        0x44 => Some(InputKey::Right),
+        0x20 => Some(InputKey::Up),
+        0x11 => Some(InputKey::Down),
+        _ => None,
+    }
+}
+
 pub fn run() {
-    let (pixels, info) = build_frame();
     unsafe {
-        FRAME = Some((pixels, info));
+        APP = Some(AppState {
+            camera: Camera::default(),
+            input: InputState::default(),
+        });
+        FRAME = Some(build_frame(Camera::default()));
     }
     let class = wide("VoxelEngineWindow");
     let title = wide("Voxel Engine - Prototype");
@@ -232,6 +276,7 @@ pub fn run() {
             instance,
             null_mut(),
         );
+        SetTimer(window, TIMER_ID, 33, null_mut());
         ShowWindow(window, SW_SHOW);
         UpdateWindow(window);
         let mut message = Message {
@@ -250,7 +295,7 @@ pub fn run() {
     }
 }
 
-fn build_frame() -> (Vec<u8>, BitmapInfo) {
+fn build_frame(camera: Camera) -> (Vec<u8>, BitmapInfo) {
     let mut world = World::new();
     let chunk = world.get_or_create_chunk(ChunkPos { x: 0, y: 0, z: 0 });
     for y in 0..4 {
@@ -295,7 +340,7 @@ fn build_frame() -> (Vec<u8>, BitmapInfo) {
     }
     .render(
         &[&mesh],
-        &Camera::default(),
+        &camera,
         &materials,
         DirectionalLight::default(),
         320,
