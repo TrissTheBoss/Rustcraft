@@ -35,6 +35,7 @@ const SW_SHOW: i32 = 5;
 const DIB_RGB_COLORS: u32 = 0;
 const SRCCOPY: u32 = 0x00CC0020;
 const TIMER_ID: usize = 1;
+const TICK_INTERVAL_MS: u32 = 50;
 const VK_ESCAPE: u32 = 0x1B;
 const WM_LBUTTONDOWN: u32 = 0x0201;
 const MAX_RENDER_WIDTH: u32 = 960;
@@ -243,7 +244,7 @@ unsafe extern "system" fn window_proc(
         WM_ERASEBKGND => 1,
         WM_TIMER if wparam == TIMER_ID => {
             if let Some(app) = APP.as_mut() {
-                app.logger.event("TRACE", "timer_tick", "interval_ms=33");
+                app.logger.event("TRACE", "timer_tick", "interval_ms=50");
                 if let Some(scene) = SCENE.as_ref() {
                     let input = MovementInput {
                         forward: app.input.is_pressed(InputKey::Forward) as i32 as f64
@@ -468,7 +469,7 @@ pub fn run(logger: Option<Logger>) {
             instance,
             null_mut(),
         );
-        SetTimer(window, TIMER_ID, 33, null_mut());
+        SetTimer(window, TIMER_ID, TICK_INTERVAL_MS, null_mut());
         ShowWindow(window, SW_SHOW);
         UpdateWindow(window);
         ShowCursor(0);

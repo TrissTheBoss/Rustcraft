@@ -14,6 +14,7 @@ pub const GRAVITY: f64 = 0.08;
 pub const JUMP_IMPULSE: f64 = 0.42;
 pub const FLIGHT_ACCELERATION: f64 = 0.049;
 pub const FLIGHT_SPEED_MULTIPLIER: f64 = 2.0;
+pub const STEP_HEIGHT: f64 = 0.6;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum GameMode {
@@ -140,6 +141,18 @@ fn move_axis(
         player.transform = candidate;
         return;
     }
+    if axis != 1 && (player.grounded || player.velocity[1] > 0.0) {
+        let mut stepped = candidate;
+        stepped.y += if player.velocity[1] > 0.0 {
+            1.0
+        } else {
+            STEP_HEIGHT
+        };
+        if !collides(stepped, player.half_extents, &is_solid) {
+            player.transform = stepped;
+            return;
+        }
+    }
     player.velocity[axis] = 0.0;
     if axis == 1 && delta < 0.0 {
         player.grounded = true;
@@ -247,5 +260,28 @@ mod tests {
             |_, _, _| false,
         );
         assert!(player.transform.y > 10.0);
+    }
+
+    #[test]
+    fn jumping_can_clear_a_single_block_grid_cell() {
+        let mut player = PlayerController::new(Transform {
+            x: 0.5,
+            y: 0.9,
+            z: 0.5,
+        });
+        player.grounded = true;
+        let solid = |x: i32, y: i32, z: i32| x == 1 && (0..1).contains(&y) && z == 0;
+        for tick in 0..20 {
+            player.tick(
+                MovementInput {
+                    forward: 1.0,
+                    jump: tick == 0,
+                    ..Default::default()
+                },
+                0.0,
+                solid,
+            );
+        }
+        assert!(player.transform.x > 0.5);
     }
 }
