@@ -27,15 +27,15 @@ const WM_KEYUP: u32 = 0x0101;
 const WM_MOUSEMOVE: u32 = 0x0200;
 const CS_HREDRAW: u32 = 0x0002;
 const CS_VREDRAW: u32 = 0x0001;
-const WS_OVERLAPPEDWINDOW: u32 = 0x00CF0000;
+const WS_POPUP: u32 = 0x80000000;
 const SW_SHOW: i32 = 5;
 const DIB_RGB_COLORS: u32 = 0;
 const SRCCOPY: u32 = 0x00CC0020;
 const TIMER_ID: usize = 1;
-const FRAME_WIDTH: i32 = 960;
-const FRAME_HEIGHT: i32 = 600;
 const VK_ESCAPE: u32 = 0x1B;
 const WM_LBUTTONDOWN: u32 = 0x0201;
+const SM_CXSCREEN: i32 = 0;
+const SM_CYSCREEN: i32 = 1;
 
 #[repr(C)]
 struct Point {
@@ -124,6 +124,7 @@ extern "system" {
     fn ShowCursor(show: i32) -> i32;
     fn GetWindowRect(window: Hwnd, rect: *mut Rect) -> i32;
     fn SetCursorPos(x: i32, y: i32) -> i32;
+    fn GetSystemMetrics(index: i32) -> i32;
 }
 #[link(name = "gdi32")]
 extern "system" {
@@ -164,6 +165,8 @@ struct AppState {
     pitch: f32,
     mouse: Option<(i32, i32)>,
     cursor_locked: bool,
+    width: i32,
+    height: i32,
 }
 
 fn wide(text: &str) -> Vec<u16> {
@@ -198,12 +201,12 @@ unsafe extern "system" fn window_proc(
                     hdc,
                     0,
                     0,
-                    FRAME_WIDTH,
-                    FRAME_HEIGHT,
+                    info.header.width,
+                    info.header.height.abs(),
                     0,
                     0,
-                    FRAME_WIDTH,
-                    FRAME_HEIGHT,
+                    info.header.width,
+                    info.header.height.abs(),
                     pixels.as_ptr() as *const c_void,
                     info,
                     DIB_RGB_COLORS,
@@ -223,7 +226,7 @@ unsafe extern "system" fn window_proc(
                     app.pitch.cos() * app.yaw.sin(),
                 );
                 app.camera.target = app.camera.position + direction;
-                FRAME = Some(build_frame(app.camera));
+                FRAME = Some(build_frame(app.camera, app.width as u32, app.height as u32));
                 InvalidateRect(window, null(), 0);
             }
             0
@@ -300,6 +303,8 @@ unsafe fn lock_cursor(window: Hwnd) {
 }
 
 pub fn run() {
+    let width = unsafe { GetSystemMetrics(SM_CXSCREEN) };
+    let height = unsafe { GetSystemMetrics(SM_CYSCREEN) };
     unsafe {
         APP = Some(AppState {
             camera: Camera::default(),
@@ -308,8 +313,10 @@ pub fn run() {
             pitch: -0.4,
             mouse: None,
             cursor_locked: true,
+            width,
+            height,
         });
-        FRAME = Some(build_frame(Camera::default()));
+        FRAME = Some(build_frame(Camera::default(), width as u32, height as u32));
     }
     let class = wide("VoxelEngineWindow");
     let title = wide("Voxel Engine - Prototype");
@@ -332,11 +339,11 @@ pub fn run() {
             0,
             class.as_ptr(),
             title.as_ptr(),
-            WS_OVERLAPPEDWINDOW,
-            100,
-            100,
-            FRAME_WIDTH,
-            FRAME_HEIGHT,
+            WS_POPUP,
+            0,
+            0,
+            width,
+            height,
             null_mut(),
             null_mut(),
             instance,
@@ -363,7 +370,7 @@ pub fn run() {
     }
 }
 
-fn build_frame(camera: Camera) -> (Vec<u8>, BitmapInfo) {
+fn build_frame(camera: Camera, width: u32, height: u32) -> (Vec<u8>, BitmapInfo) {
     let mut world = World::new();
     let chunk = world.get_or_create_chunk(ChunkPos { x: 0, y: 0, z: 0 });
     for y in 0..4 {
@@ -411,8 +418,8 @@ fn build_frame(camera: Camera) -> (Vec<u8>, BitmapInfo) {
         &camera,
         &materials,
         DirectionalLight::default(),
-        FRAME_WIDTH as u32,
-        FRAME_HEIGHT as u32,
+        width,
+        height,
     )
     .unwrap();
     let pixels = frame
@@ -423,8 +430,8 @@ fn build_frame(camera: Camera) -> (Vec<u8>, BitmapInfo) {
     let info = BitmapInfo {
         header: BitmapInfoHeader {
             size: size_of::<BitmapInfoHeader>() as u32,
-            width: FRAME_WIDTH,
-            height: -FRAME_HEIGHT,
+            width: width as i32,
+            height: -(height as i32),
             planes: 1,
             bit_count: 32,
             compression: 0,
