@@ -6,7 +6,7 @@ Voxel Engine is a clean-room Rust project for building an original voxel game en
 
 The roadmap covers original implementations of rendering, world/chunk storage and streaming, meshing, lighting, entities, collision, deterministic simulation, networking, resource formats, and developer tooling.
 
-The current `0.3.1` build contains the headless world foundation, deterministic fixed-step simulation with voxel collision queries and replay snapshots, and a dependency-free CPU rendering pipeline. Running the binary generates an original flat scene, meshes its visible faces, rasterizes a 320x200 frame, and reports visible pixels and render timing. It does not yet create a window or use a GPU.
+The current `0.4.0` build contains the world foundation, deterministic fixed-step simulation with voxel collision queries and replay snapshots, and a dependency-free CPU rendering pipeline. On Windows, running the binary opens a native prototype window displaying the generated voxel scene; non-Windows builds retain the headless metrics demo. It does not yet provide player input, a GPU backend, or a complete game loop.
 
 ## Compatibility boundary
 
@@ -56,7 +56,7 @@ Simulation implementation status: `src/simulation.rs` provides a fixed-step cloc
 - Add chunk meshing, face culling, texture/resource loading, and basic lighting.
 - Add frame-time and memory profiling before optimization decisions.
 
-Rendering implementation status: the CPU pipeline is implemented in `src/render.rs` and exercised by unit tests. Window creation and GPU presentation are pending because this environment cannot download the selected `wgpu`/`winit` dependencies. The CPU renderer is a testable baseline, not a claim that the interactive rendering milestone is complete.
+Rendering implementation status: the CPU pipeline is implemented in `src/render.rs`, and `src/window.rs` provides a minimal native Windows presentation surface using the system API. Player input, continuous frame updates, and GPU presentation remain pending. The window is an early playable-surface milestone, not a claim that the game is complete.
 
 ### v0.5 — Developer tooling
 

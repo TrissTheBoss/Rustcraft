@@ -4,6 +4,8 @@ pub mod networking;
 pub mod render;
 pub mod resource;
 pub mod simulation;
+#[cfg(windows)]
+pub mod window;
 pub mod world;
 
 pub const ENGINE_NAME: &str = "Voxel Engine";

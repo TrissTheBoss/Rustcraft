@@ -1,10 +1,22 @@
+#[cfg(not(windows))]
 use voxel_engine::render::{
     mesh_chunk, Camera, CpuRenderer, DirectionalLight, FrameProfiler, Material, MaterialRegistry,
     Renderer,
 };
+#[cfg(not(windows))]
 use voxel_engine::world::{BlockId, ChunkPos, World, CHUNK_SIZE};
 
 fn main() {
+    #[cfg(windows)]
+    {
+        voxel_engine::window::run();
+    }
+    #[cfg(not(windows))]
+    run_headless();
+}
+
+#[cfg(not(windows))]
+fn run_headless() {
     let mut world = World::new();
     let chunk = world.get_or_create_chunk(ChunkPos { x: 0, y: 0, z: 0 });
     for y in 0..4 {
@@ -60,7 +72,7 @@ fn main() {
     let mut profiler = FrameProfiler::new(8);
     profiler.record(started.elapsed());
     let visible_pixels = frame.depth.iter().filter(|depth| depth.is_finite()).count();
-    println!("Voxel Engine 0.3.1 prototype");
+    println!("Voxel Engine 0.4.0 prototype");
     println!(
         "world: {} chunk, mesh: {} triangles, frame: {}x{} ({} visible pixels)",
         world.chunk_count(),
