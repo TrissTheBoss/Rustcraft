@@ -270,6 +270,20 @@ unsafe extern "system" fn window_proc(
                             .get_chunk(position)
                             .is_some_and(|chunk| chunk.get(lx, ly, lz).unwrap() != BlockId(0))
                     });
+                    app.logger.event(
+                        "TRACE",
+                        "player_tick",
+                        format!(
+                            "x={:.4} y={:.4} z={:.4} vx={:.4} vy={:.4} vz={:.4} grounded={}",
+                            app.player.transform.x,
+                            app.player.transform.y,
+                            app.player.transform.z,
+                            app.player.velocity[0],
+                            app.player.velocity[1],
+                            app.player.velocity[2],
+                            app.player.grounded
+                        ),
+                    );
                     app.camera.position = Vec3::new(
                         app.player.transform.x as f32,
                         (app.player.transform.y + 1.62) as f32,
@@ -439,7 +453,7 @@ pub fn run(logger: Option<Logger>) {
         ));
     }
     let class = wide("VoxelEngineWindow");
-    let title = wide("Voxel Engine - Prototype");
+    let title = wide("Voxel Engine 0.8.4 - Java 26.3 Movement Prototype");
     unsafe {
         let instance = GetModuleHandleW(null());
         let wnd_class = WndClassW {
