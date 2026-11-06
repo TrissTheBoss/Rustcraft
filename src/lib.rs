@@ -2,6 +2,7 @@
 pub mod asset_extract;
 pub mod entity;
 pub mod logger;
+pub mod movement;
 pub mod networking;
 pub mod render;
 pub mod resource;
