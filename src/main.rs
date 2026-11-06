@@ -9,7 +9,7 @@ use voxel_engine::world::{BlockId, ChunkPos, World, CHUNK_SIZE};
 fn main() {
     let logger = voxel_engine::logger::Logger::start("voxel-engine.log").ok();
     if let Some(logger) = &logger {
-        logger.event("INFO", "logger_started", "version=0.8.4");
+        logger.event("INFO", "logger_started", "version=0.8.6");
     }
     if std::env::args().nth(1).as_deref() == Some("--extract-assets") {
         let jar = std::env::args().nth(2).map(std::path::PathBuf::from);

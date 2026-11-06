@@ -849,19 +849,34 @@ fn mesh_visible(mesh: &Mesh, matrix: Mat4) -> bool {
     if mesh.vertices.is_empty() {
         return false;
     }
-    let center = (mesh.bounds_min + mesh.bounds_max) * 0.5;
-    let radius = (mesh.bounds_max - center).length();
-    let clip = matrix.transform([center.x, center.y, center.z, 1.0]);
-    if !clip.iter().all(|value| value.is_finite()) || clip[3] <= 0.0 {
+    let min = mesh.bounds_min;
+    let max = mesh.bounds_max;
+    let mut corners = Vec::with_capacity(8);
+    for &x in &[min.x, max.x] {
+        for &y in &[min.y, max.y] {
+            for &z in &[min.z, max.z] {
+                corners.push(matrix.transform([x, y, z, 1.0]));
+            }
+        }
+    }
+    if corners
+        .iter()
+        .any(|corner| !corner.iter().all(|value| value.is_finite()))
+    {
         return false;
     }
-    let margin = radius * 1.8;
-    clip[0] >= -clip[3] - margin
-        && clip[0] <= clip[3] + margin
-        && clip[1] >= -clip[3] - margin
-        && clip[1] <= clip[3] + margin
-        && clip[2] >= -margin
-        && clip[2] <= clip[3] + margin
+    // A box intersecting the near plane is conservatively retained.
+    if corners.iter().any(|corner| corner[3] <= 0.0) {
+        return true;
+    }
+    for plane in 0..3 {
+        let outside_negative = corners.iter().all(|corner| corner[plane] < -corner[3]);
+        let outside_positive = corners.iter().all(|corner| corner[plane] > corner[3]);
+        if outside_negative || outside_positive {
+            return false;
+        }
+    }
+    true
 }
 
 fn raster_triangle(

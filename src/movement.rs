@@ -4,6 +4,7 @@
 //! intentionally centralized so later conformance measurements can adjust them.
 
 use crate::entity::Transform;
+use crate::grid::{PLAYER_HALF_HEIGHT, PLAYER_HALF_WIDTH, PLAYER_STEP_HEIGHT};
 
 pub const TICKS_PER_SECOND: f64 = 20.0;
 pub const WALK_ACCELERATION: f64 = 0.098;
@@ -14,7 +15,7 @@ pub const GRAVITY: f64 = 0.08;
 pub const JUMP_IMPULSE: f64 = 0.42;
 pub const FLIGHT_ACCELERATION: f64 = 0.049;
 pub const FLIGHT_SPEED_MULTIPLIER: f64 = 2.0;
-pub const STEP_HEIGHT: f64 = 0.6;
+pub const STEP_HEIGHT: f64 = PLAYER_STEP_HEIGHT;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum GameMode {
@@ -48,7 +49,7 @@ impl PlayerController {
         Self {
             transform,
             velocity: [0.0; 3],
-            half_extents: [0.3, 0.9, 0.3],
+            half_extents: [PLAYER_HALF_WIDTH, PLAYER_HALF_HEIGHT, PLAYER_HALF_WIDTH],
             mode: GameMode::Survival,
             flying: false,
             grounded: false,

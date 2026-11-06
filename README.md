@@ -6,7 +6,7 @@ Voxel Engine is a clean-room Rust project for building an original voxel game en
 
 The roadmap covers original implementations of rendering, world/chunk storage and streaming, meshing, lighting, entities, collision, deterministic simulation, networking, resource formats, and developer tooling.
 
-The current `0.8.4` build contains the world foundation, deterministic terrain generation, a Java Edition 26.3-targeted movement controller wired into the Windows player loop, fixed-step simulation with voxel collision queries and replay snapshots, and an optimized dependency-free CPU rendering pipeline. Movement advances at 20 Hz, uses explicit 16-block chunk/grid coordinates, supports one-block jump clearance, and logs player position/velocity/grounding each tick for diagnostics.
+The current `0.8.6` build contains the world foundation, deterministic terrain generation, a Java Edition 26.3-targeted movement controller wired into the Windows player loop, fixed-step simulation with voxel collision queries and replay snapshots, and an optimized dependency-free CPU rendering pipeline. Movement advances at 20 Hz, uses explicit 16-block chunk/grid coordinates, supports one-block jump clearance, and logs player position/velocity/grounding each tick for diagnostics.
 
 ## Compatibility boundary
 
@@ -67,6 +67,8 @@ Rendering implementation status: the CPU pipeline is implemented in `src/render.
 Terrain implementation status: `src/terrain.rs` generates deterministic seeded chunks with varied surface, soil, and rock layers. These are original engine blocks and procedural colors; Minecraft-owned textures and assets are intentionally not included.
 
 Large-world rendering status: the prototype generates a bounded chunk region, meshes each chunk with neighboring occupancy checks, and translates meshes into world space. Runtime chunk streaming and GPU batching remain the next scale steps.
+
+Grid contract: one block is 1×1×1 world unit; chunks are 16×16×16 blocks; the player is 0.6 blocks wide and 1.8 blocks tall with a 1.62-block eye height and 0.6-block step height. Frustum tests use all eight chunk-bound corners and conservatively retain near-plane intersections.
 
 Performance status: greedy meshing merges coplanar faces with matching block IDs and scales UVs for repeated textures. Mesh bounds are tested against the camera frustum before rasterization. Terrain and meshes are cached instead of rebuilt every frame, and the CPU render buffer is capped at 960x600 before scaling to the native window. The CPU renderer remains a prototype and is not yet a substitute for GPU batching.
 
