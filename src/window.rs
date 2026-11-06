@@ -127,6 +127,7 @@ extern "system" {
     fn PostQuitMessage(code: i32);
     fn InvalidateRect(window: Hwnd, rect: *const Rect, erase: i32) -> i32;
     fn SetTimer(window: Hwnd, id: usize, interval: u32, callback: *mut c_void) -> usize;
+    fn SetWindowTextW(window: Hwnd, title: *const u16) -> i32;
     fn ClipCursor(rect: *const Rect) -> i32;
     fn ShowCursor(show: i32) -> i32;
     fn GetWindowRect(window: Hwnd, rect: *mut Rect) -> i32;
@@ -285,6 +286,15 @@ unsafe extern "system" fn window_proc(
                             app.player.grounded
                         ),
                     );
+                    let title = wide(&format!(
+                        "Voxel Engine 0.8.7 | block={:.2},{:.2},{:.2} speed={:.2} b/s",
+                        app.player.transform.x,
+                        app.player.transform.y,
+                        app.player.transform.z,
+                        (app.player.velocity[0].powi(2) + app.player.velocity[2].powi(2)).sqrt()
+                            * 20.0
+                    ));
+                    SetWindowTextW(window, title.as_ptr());
                     app.camera.position = Vec3::new(
                         app.player.transform.x as f32,
                         (app.player.transform.y + PLAYER_EYE_HEIGHT) as f32,

@@ -132,7 +132,9 @@ fn move_axis(
     is_solid: &impl Fn(i32, i32, i32) -> bool,
 ) {
     let mut candidate = player.transform;
-    let delta = player.velocity[axis] / TICKS_PER_SECOND;
+    // Velocity is stored in blocks per simulation tick, so do not divide it
+    // again when applying the 20 Hz tick displacement.
+    let delta = player.velocity[axis];
     match axis {
         0 => candidate.x += delta,
         1 => candidate.y += delta,
@@ -161,10 +163,11 @@ fn move_axis(
 }
 
 fn collides(center: Transform, half: [f64; 3], is_solid: &impl Fn(i32, i32, i32) -> bool) -> bool {
+    let epsilon = 1.0e-9;
     let ranges = [
-        (center.x - half[0]).floor() as i32..(center.x + half[0]).ceil() as i32,
-        (center.y - half[1]).floor() as i32..(center.y + half[1]).ceil() as i32,
-        (center.z - half[2]).floor() as i32..(center.z + half[2]).ceil() as i32,
+        (center.x - half[0] + epsilon).floor() as i32..(center.x + half[0] - epsilon).ceil() as i32,
+        (center.y - half[1] + epsilon).floor() as i32..(center.y + half[1] - epsilon).ceil() as i32,
+        (center.z - half[2] + epsilon).floor() as i32..(center.z + half[2] - epsilon).ceil() as i32,
     ];
     ranges[0].clone().any(|x| {
         ranges[1]
@@ -284,5 +287,26 @@ mod tests {
             );
         }
         assert!(player.transform.x > 0.5);
+    }
+
+    #[test]
+    fn ground_contact_does_not_block_horizontal_speed() {
+        let mut player = PlayerController::new(Transform {
+            x: 0.5,
+            y: 1.9,
+            z: 0.5,
+        });
+        player.grounded = true;
+        for _ in 0..40 {
+            player.tick(
+                MovementInput {
+                    forward: 1.0,
+                    ..Default::default()
+                },
+                0.0,
+                |_, y, _| y == 0,
+            );
+        }
+        assert!(player.transform.x > 2.0);
     }
 }
