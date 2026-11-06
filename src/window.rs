@@ -7,7 +7,7 @@ use std::ptr::{null, null_mut};
 
 use crate::render::{
     mesh_chunk, Camera, CpuRenderer, DirectionalLight, InputKey, InputState, Material,
-    MaterialRegistry, Renderer,
+    MaterialRegistry, Renderer, Vec3,
 };
 use crate::world::{BlockId, ChunkPos, World, CHUNK_SIZE};
 
@@ -24,6 +24,7 @@ const WM_ERASEBKGND: u32 = 0x0014;
 const WM_TIMER: u32 = 0x0113;
 const WM_KEYDOWN: u32 = 0x0100;
 const WM_KEYUP: u32 = 0x0101;
+const WM_MOUSEMOVE: u32 = 0x0200;
 const CS_HREDRAW: u32 = 0x0002;
 const CS_VREDRAW: u32 = 0x0001;
 const WS_OVERLAPPEDWINDOW: u32 = 0x00CF0000;
@@ -151,6 +152,9 @@ static mut APP: Option<AppState> = None;
 struct AppState {
     camera: Camera,
     input: InputState,
+    yaw: f32,
+    pitch: f32,
+    mouse: Option<(i32, i32)>,
 }
 
 fn wide(text: &str) -> Vec<u16> {
@@ -204,8 +208,26 @@ unsafe extern "system" fn window_proc(
         WM_TIMER if wparam == TIMER_ID => {
             if let Some(app) = APP.as_mut() {
                 app.input.move_camera(&mut app.camera, 1.0 / 30.0, 8.0);
+                let direction = Vec3::new(
+                    app.pitch.cos() * app.yaw.cos(),
+                    app.pitch.sin(),
+                    app.pitch.cos() * app.yaw.sin(),
+                );
+                app.camera.target = app.camera.position + direction;
                 FRAME = Some(build_frame(app.camera));
                 InvalidateRect(window, null(), 0);
+            }
+            0
+        }
+        WM_MOUSEMOVE => {
+            if let Some(app) = APP.as_mut() {
+                let x = (lparam as u32 & 0xffff) as i16 as i32;
+                let y = ((lparam as u32 >> 16) & 0xffff) as i16 as i32;
+                if let Some((last_x, last_y)) = app.mouse {
+                    app.yaw += (x - last_x) as f32 * 0.006;
+                    app.pitch = (app.pitch - (y - last_y) as f32 * 0.006).clamp(-1.45, 1.45);
+                }
+                app.mouse = Some((x, y));
             }
             0
         }
@@ -242,6 +264,9 @@ pub fn run() {
         APP = Some(AppState {
             camera: Camera::default(),
             input: InputState::default(),
+            yaw: -2.16,
+            pitch: -0.4,
+            mouse: None,
         });
         FRAME = Some(build_frame(Camera::default()));
     }
