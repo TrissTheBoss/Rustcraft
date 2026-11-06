@@ -4,7 +4,7 @@
 //! intentionally centralized so later conformance measurements can adjust them.
 
 use crate::entity::Transform;
-use crate::grid::{PLAYER_HALF_HEIGHT, PLAYER_HALF_WIDTH, PLAYER_STEP_HEIGHT};
+use crate::grid::{PLAYER_HALF_HEIGHT, PLAYER_HALF_WIDTH};
 
 pub const TICKS_PER_SECOND: f64 = 20.0;
 pub const WALK_ACCELERATION: f64 = 0.098;
@@ -15,7 +15,6 @@ pub const GRAVITY: f64 = 0.08;
 pub const JUMP_IMPULSE: f64 = 0.42;
 pub const FLIGHT_ACCELERATION: f64 = 0.049;
 pub const FLIGHT_SPEED_MULTIPLIER: f64 = 2.0;
-pub const STEP_HEIGHT: f64 = PLAYER_STEP_HEIGHT;
 pub const WALK_SPEED_PER_TICK: f64 = 4.317 / TICKS_PER_SECOND;
 pub const SPRINT_SPEED_PER_TICK: f64 = 5.612 / TICKS_PER_SECOND;
 
@@ -156,18 +155,6 @@ fn move_axis(
     if !collides(candidate, player.half_extents, &is_solid) {
         player.transform = candidate;
         return;
-    }
-    if axis != 1 && (player.grounded || player.velocity[1] > 0.0) {
-        let mut stepped = candidate;
-        stepped.y += if player.velocity[1] > 0.0 {
-            1.0
-        } else {
-            STEP_HEIGHT
-        };
-        if !collides(stepped, player.half_extents, &is_solid) {
-            player.transform = stepped;
-            return;
-        }
     }
     player.velocity[axis] = 0.0;
     if axis == 1 && delta < 0.0 {
@@ -343,5 +330,28 @@ mod tests {
             );
         }
         assert!(player.velocity[0] <= WALK_SPEED_PER_TICK + 1.0e-9);
+    }
+
+    #[test]
+    fn horizontal_collision_never_steps_player_onto_a_block() {
+        let mut player = PlayerController::new(Transform {
+            x: 0.5,
+            y: 0.9,
+            z: 0.5,
+        });
+        player.grounded = true;
+        let solid = |x: i32, y: i32, z: i32| x == 1 && y == 0 && z == 0;
+        for _ in 0..40 {
+            player.tick(
+                MovementInput {
+                    forward: 1.0,
+                    ..Default::default()
+                },
+                0.0,
+                solid,
+            );
+        }
+        assert!(player.transform.x <= 0.7 + 1.0e-9);
+        assert!((player.transform.y - 0.9).abs() < 1.0e-9);
     }
 }
