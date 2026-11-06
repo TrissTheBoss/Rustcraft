@@ -60,7 +60,7 @@ fn main() {
     let mut profiler = FrameProfiler::new(8);
     profiler.record(started.elapsed());
     let visible_pixels = frame.depth.iter().filter(|depth| depth.is_finite()).count();
-    println!("Voxel Engine 0.3.0 prototype");
+    println!("Voxel Engine 0.3.1 prototype");
     println!(
         "world: {} chunk, mesh: {} triangles, frame: {}x{} ({} visible pixels)",
         world.chunk_count(),

@@ -6,7 +6,7 @@ Voxel Engine is a clean-room Rust project for building an original voxel game en
 
 The roadmap covers original implementations of rendering, world/chunk storage and streaming, meshing, lighting, entities, collision, deterministic simulation, networking, resource formats, and developer tooling.
 
-The current `0.3.0` build contains the headless world foundation, deterministic fixed-step simulation, and a dependency-free CPU rendering pipeline. Running the binary generates an original flat scene, meshes its visible faces, rasterizes a 320x200 frame, and reports visible pixels and render timing. It does not yet create a window or use a GPU.
+The current `0.3.1` build contains the headless world foundation, deterministic fixed-step simulation with voxel collision queries and replay snapshots, and a dependency-free CPU rendering pipeline. Running the binary generates an original flat scene, meshes its visible faces, rasterizes a 320x200 frame, and reports visible pixels and render timing. It does not yet create a window or use a GPU.
 
 ## Compatibility boundary
 
@@ -47,7 +47,7 @@ CI runs formatting, tests, and a release build through GitHub Actions.
 - Add gravity and movement integration.
 - Add deterministic replay fixtures and simulation regression tests.
 
-Simulation implementation status: `src/simulation.rs` provides a fixed-step clock, stable entity lifecycle storage, gravity, and ground-plane collision with regression tests.
+Simulation implementation status: `src/simulation.rs` provides a fixed-step clock, stable entity lifecycle storage, gravity, voxel occupancy collision queries, ground-plane collision, snapshots, and regression tests.
 
 ### v0.4 — Rendering foundation
 

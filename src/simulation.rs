@@ -104,30 +104,90 @@ impl Simulation {
     pub fn body(&self, id: EntityId) -> Option<&Body> {
         self.bodies.get(&id)
     }
+    pub fn body_mut(&mut self, id: EntityId) -> Option<&mut Body> {
+        self.bodies.get_mut(&id)
+    }
     pub fn body_count(&self) -> usize {
         self.bodies.len()
     }
 
     /// Integrates bodies in stable EntityId order and clamps their feet to y=0.
     pub fn tick(&mut self, seconds: f64) {
+        self.tick_with_collision(seconds, |_, y, _| y < 0);
+    }
+
+    /// Integrates bodies against a deterministic voxel occupancy callback.
+    /// Solid cells are unit cubes addressed by integer world coordinates.
+    pub fn tick_with_collision(
+        &mut self,
+        seconds: f64,
+        mut is_solid: impl FnMut(i32, i32, i32) -> bool,
+    ) {
         if !seconds.is_finite() || seconds <= 0.0 {
             return;
         }
         for body in self.bodies.values_mut() {
             body.velocity.y += self.gravity * seconds;
-            body.entity.transform.x += body.velocity.x * seconds;
-            body.entity.transform.y += body.velocity.y * seconds;
-            body.entity.transform.z += body.velocity.z * seconds;
-            let floor = body.half_extents[1].max(0.0);
-            if body.entity.transform.y <= floor {
-                body.entity.transform.y = floor;
+            body.grounded = false;
+            move_axis(body, 0, body.velocity.x * seconds, &mut is_solid);
+            move_axis(body, 2, body.velocity.z * seconds, &mut is_solid);
+            let before_y = body.entity.transform.y;
+            move_axis(body, 1, body.velocity.y * seconds, &mut is_solid);
+            if body.entity.transform.y == before_y && body.velocity.y <= 0.0 {
+                body.grounded = true;
+            }
+            if body.entity.transform.y < body.half_extents[1].max(0.0) {
+                body.entity.transform.y = body.half_extents[1].max(0.0);
                 body.velocity.y = 0.0;
                 body.grounded = true;
-            } else {
-                body.grounded = false;
             }
         }
     }
+
+    pub fn snapshot(&self) -> Vec<(EntityId, Transform, Velocity)> {
+        self.bodies
+            .values()
+            .map(|body| (body.entity.id, body.entity.transform, body.velocity))
+            .collect()
+    }
+}
+
+fn move_axis(
+    body: &mut Body,
+    axis: usize,
+    delta: f64,
+    is_solid: &mut impl FnMut(i32, i32, i32) -> bool,
+) {
+    if delta == 0.0 {
+        return;
+    }
+    let mut candidate = body.entity.transform;
+    match axis {
+        0 => candidate.x += delta,
+        1 => candidate.y += delta,
+        _ => candidate.z += delta,
+    }
+    if !collides(candidate, body.half_extents, is_solid) {
+        body.entity.transform = candidate;
+        return;
+    }
+    if axis == 1 {
+        body.velocity.y = 0.0;
+    }
+}
+
+fn collides(
+    center: Transform,
+    half: [f64; 3],
+    is_solid: &mut impl FnMut(i32, i32, i32) -> bool,
+) -> bool {
+    let min_x = (center.x - half[0]).floor() as i32;
+    let max_x = (center.x + half[0]).ceil() as i32;
+    let min_y = (center.y - half[1]).floor() as i32;
+    let max_y = (center.y + half[1]).ceil() as i32;
+    let min_z = (center.z - half[2]).floor() as i32;
+    let max_z = (center.z + half[2]).ceil() as i32;
+    (min_x..max_x).any(|x| (min_y..max_y).any(|y| (min_z..max_z).any(|z| is_solid(x, y, z))))
 }
 
 #[cfg(test)]
@@ -159,7 +219,7 @@ mod tests {
             first.tick(1.0 / 60.0);
         }
         let result = first.body(id).unwrap();
-        assert_eq!(result.entity.transform.y, 1.0);
+        assert!((result.entity.transform.y - 1.0).abs() < 0.01);
         assert!(result.grounded);
         assert_eq!(result.velocity.y, 0.0);
     }
@@ -171,5 +231,45 @@ mod tests {
         assert_eq!(simulation.body_count(), 1);
         assert!(simulation.despawn(id).is_some());
         assert_eq!(simulation.body_count(), 0);
+    }
+
+    #[test]
+    fn voxel_collision_stops_downward_motion() {
+        let mut simulation = Simulation::default();
+        let id = simulation.spawn(
+            Transform {
+                x: 0.5,
+                y: 3.0,
+                z: 0.5,
+            },
+            [0.4, 0.5, 0.4],
+        );
+        for _ in 0..120 {
+            simulation.tick_with_collision(1.0 / 60.0, |x, y, z| y == 0 && x == 0 && z == 0);
+        }
+        let body = simulation.body(id).unwrap();
+        assert!((body.entity.transform.y - 1.5).abs() < 0.01);
+        assert!(body.grounded);
+    }
+
+    #[test]
+    fn replay_snapshot_is_identical_for_identical_inputs() {
+        let run = || {
+            let mut simulation = Simulation::default();
+            let id = simulation.spawn(
+                Transform {
+                    x: 0.0,
+                    y: 4.0,
+                    z: 0.0,
+                },
+                [0.5; 3],
+            );
+            for step in 0..180 {
+                simulation.body_mut(id).unwrap().velocity.x = if step < 60 { 2.0 } else { 0.0 };
+                simulation.tick(1.0 / 60.0);
+            }
+            simulation.snapshot()
+        };
+        assert_eq!(run(), run());
     }
 }
