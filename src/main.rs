@@ -196,6 +196,7 @@ fn listen_for_trigger(logger: &mut Logger, executable: &str, game_args: &[String
         }
     };
     let token = env::var("RUSTCRAFT_TRIGGER_TOKEN").unwrap_or_else(|_| "local-only".to_owned());
+    let expected_request = format!("RUSTCRAFT {token}");
     logger.info("listener_started", "address=127.0.0.1:39281");
     for stream in listener.incoming() {
         let mut stream = match stream {
@@ -206,10 +207,11 @@ fn listen_for_trigger(logger: &mut Logger, executable: &str, game_args: &[String
             }
         };
         let _ = stream.set_nodelay(true);
+        let _ = stream.set_read_timeout(Some(std::time::Duration::from_millis(500)));
         let _ = stream.set_write_timeout(Some(std::time::Duration::from_millis(500)));
         let mut line = String::new();
         if BufReader::new(&mut stream).read_line(&mut line).is_ok()
-            && line.trim() == format!("RUSTCRAFT {token}")
+            && is_authorized_request(&line, &expected_request)
         {
             logger.info("trigger_authorized", "source=loopback");
             let result = Command::new(executable).args(game_args).spawn();
@@ -222,6 +224,10 @@ fn listen_for_trigger(logger: &mut Logger, executable: &str, game_args: &[String
         }
     }
     ExitCode::SUCCESS
+}
+
+fn is_authorized_request(line: &str, expected_request: &str) -> bool {
+    line.trim() == expected_request
 }
 
 #[cfg(test)]
@@ -248,5 +254,18 @@ mod tests {
         let result = read_command(&path);
         let _ = fs::remove_file(&path);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn protocol_accepts_only_exact_trimmed_request() {
+        assert!(is_authorized_request(
+            "RUSTCRAFT local-only\n",
+            "RUSTCRAFT local-only"
+        ));
+        assert!(!is_authorized_request(
+            "RUSTCRAFT local-only-extra",
+            "RUSTCRAFT local-only"
+        ));
+        assert!(!is_authorized_request("RUSTCRAFT", "RUSTCRAFT local-only"));
     }
 }
