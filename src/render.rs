@@ -1,12 +1,14 @@
 //! Small, dependency-free rendering pipeline for the clean-room engine.
 //!
 //! This module provides camera math, frame pacing, visible-face chunk meshing,
-//! original PPM texture loading, directional lighting, CPU triangle rendering,
+//! original PPM/PNG texture loading, directional lighting, CPU triangle rendering,
 //! and frame profiling. A platform GPU/window adapter can consume the same mesh
 //! and camera interfaces when the project can add its selected graphics crates.
 
 use std::io::{self, Read};
 use std::time::{Duration, Instant};
+
+use image::ImageReader;
 
 use crate::world::{BlockId, Chunk, CHUNK_SIZE};
 
@@ -649,6 +651,25 @@ pub fn load_ppm<R: Read>(mut input: R) -> io::Result<RgbImage> {
         width,
         height,
         pixels,
+    })
+}
+
+/// Loads a local PNG into the renderer's RGB texture format. Callers control
+/// the path; the renderer performs no network access or asset discovery.
+pub fn load_png(path: impl AsRef<std::path::Path>) -> io::Result<RgbImage> {
+    let path = path.as_ref();
+    let image = ImageReader::open(path)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?
+        .decode()
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?
+        .to_rgb8();
+    Ok(RgbImage {
+        width: image.width(),
+        height: image.height(),
+        pixels: image
+            .pixels()
+            .map(|pixel| [pixel[0], pixel[1], pixel[2]])
+            .collect(),
     })
 }
 

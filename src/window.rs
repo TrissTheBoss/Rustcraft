@@ -10,8 +10,8 @@ use crate::grid::PLAYER_EYE_OFFSET;
 use crate::logger::Logger;
 use crate::movement::{GameMode, MovementInput, PlayerController};
 use crate::render::{
-    greedy_mesh_chunk, Camera, CpuRenderer, DirectionalLight, InputKey, InputState, Material,
-    MaterialRegistry, Mesh, Renderer, Vec3,
+    greedy_mesh_chunk, load_png, Camera, CpuRenderer, DirectionalLight, InputKey, InputState,
+    Material, MaterialRegistry, Mesh, Renderer, Vec3,
 };
 use crate::terrain::{TerrainGenerator, ROCK, SOIL, SURFACE};
 use crate::world::{ChunkPos, CHUNK_SIZE};
@@ -544,12 +544,22 @@ fn build_scene() -> Scene {
         }
     }
     let mut materials = MaterialRegistry::default();
+    let extracted = std::path::Path::new("assets/extracted/textures/blocks");
+    let mut texture = |name: &str| {
+        load_png(extracted.join(name))
+            .ok()
+            .and_then(|image| materials.register_texture(image).ok())
+    };
+    let dirt = texture("dirt.png");
+    let grass = texture("grass_block_side.png");
+    let stone = texture("stone.png");
+    drop(texture);
     materials
         .register(
             SOIL,
             Material {
                 color: [110, 160, 86],
-                texture: None,
+                texture: dirt,
             },
         )
         .unwrap();
@@ -558,7 +568,7 @@ fn build_scene() -> Scene {
             SURFACE,
             Material {
                 color: [150, 105, 66],
-                texture: None,
+                texture: grass,
             },
         )
         .unwrap();
@@ -567,7 +577,7 @@ fn build_scene() -> Scene {
             ROCK,
             Material {
                 color: [106, 106, 112],
-                texture: None,
+                texture: stone,
             },
         )
         .unwrap();
