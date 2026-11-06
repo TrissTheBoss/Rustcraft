@@ -825,23 +825,82 @@ impl Renderer for CpuRenderer {
                     mesh.vertices[triangle[1] as usize],
                     mesh.vertices[triangle[2] as usize],
                 ];
-                let clip = vertices
-                    .map(|v| matrix.transform([v.position.x, v.position.y, v.position.z, 1.0]));
-                if clip.iter().any(|v| v[3] <= 0.0 || !v[3].is_finite()) {
-                    continue;
-                }
-                let screen = clip.map(|v| {
-                    let inv_w = 1.0 / v[3];
-                    [
-                        (v[0] * inv_w * 0.5 + 0.5) * width as f32,
-                        (0.5 - v[1] * inv_w * 0.5) * height as f32,
-                        v[2] * inv_w,
-                    ]
+                let clip = vertices.map(|vertex| ClipVertex {
+                    vertex,
+                    clip: matrix.transform([
+                        vertex.position.x,
+                        vertex.position.y,
+                        vertex.position.z,
+                        1.0,
+                    ]),
                 });
-                raster_triangle(&mut frame, screen, vertices, materials, light);
+                let polygon = clip_near_plane(&clip);
+                for triangle_index in 1..polygon.len().saturating_sub(1) {
+                    let clipped = [
+                        polygon[0],
+                        polygon[triangle_index],
+                        polygon[triangle_index + 1],
+                    ];
+                    let screen = clipped.map(|value| {
+                        let inv_w = 1.0 / value.clip[3];
+                        [
+                            (value.clip[0] * inv_w * 0.5 + 0.5) * width as f32,
+                            (0.5 - value.clip[1] * inv_w * 0.5) * height as f32,
+                            value.clip[2] * inv_w,
+                        ]
+                    });
+                    raster_triangle(
+                        &mut frame,
+                        screen,
+                        clipped.map(|value| value.vertex),
+                        materials,
+                        light,
+                    );
+                }
             }
         }
         Ok(frame)
+    }
+}
+
+#[derive(Clone, Copy)]
+struct ClipVertex {
+    vertex: Vertex,
+    clip: [f32; 4],
+}
+
+fn clip_near_plane(input: &[ClipVertex; 3]) -> Vec<ClipVertex> {
+    const EPSILON: f32 = 0.001;
+    let mut output = Vec::with_capacity(4);
+    for index in 0..input.len() {
+        let current = input[index];
+        let previous = input[(index + input.len() - 1) % input.len()];
+        let current_inside = current.clip[3] >= EPSILON;
+        let previous_inside = previous.clip[3] >= EPSILON;
+        if current_inside != previous_inside {
+            let amount = (EPSILON - previous.clip[3]) / (current.clip[3] - previous.clip[3]);
+            output.push(interpolate_clip(previous, current, amount));
+        }
+        if current_inside {
+            output.push(current);
+        }
+    }
+    output
+}
+
+fn interpolate_clip(a: ClipVertex, b: ClipVertex, amount: f32) -> ClipVertex {
+    let lerp = |x: f32, y: f32| x + (y - x) * amount;
+    ClipVertex {
+        vertex: Vertex {
+            position: a.vertex.position + (b.vertex.position - a.vertex.position) * amount,
+            normal: (a.vertex.normal + (b.vertex.normal - a.vertex.normal) * amount).normalized(),
+            block: a.vertex.block,
+            uv: [
+                lerp(a.vertex.uv[0], b.vertex.uv[0]),
+                lerp(a.vertex.uv[1], b.vertex.uv[1]),
+            ],
+        },
+        clip: std::array::from_fn(|index| lerp(a.clip[index], b.clip[index])),
     }
 }
 
