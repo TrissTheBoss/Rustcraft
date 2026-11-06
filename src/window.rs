@@ -5,6 +5,7 @@ use std::ffi::c_void;
 use std::mem::size_of;
 use std::ptr::{null, null_mut};
 
+use crate::logger::Logger;
 use crate::render::{
     mesh_chunk, Camera, CpuRenderer, DirectionalLight, InputKey, InputState, Material,
     MaterialRegistry, Renderer, Vec3,
@@ -169,6 +170,7 @@ struct AppState {
     cursor_locked: bool,
     width: i32,
     height: i32,
+    logger: Logger,
 }
 
 fn wide(text: &str) -> Vec<u16> {
@@ -221,6 +223,7 @@ unsafe extern "system" fn window_proc(
         WM_ERASEBKGND => 1,
         WM_TIMER if wparam == TIMER_ID => {
             if let Some(app) = APP.as_mut() {
+                app.logger.event("TRACE", "timer_tick", "interval_ms=33");
                 app.input.move_camera(&mut app.camera, 1.0 / 30.0, 8.0);
                 let direction = Vec3::new(
                     app.pitch.cos() * app.yaw.cos(),
@@ -229,6 +232,11 @@ unsafe extern "system" fn window_proc(
                 );
                 app.camera.target = app.camera.position + direction;
                 FRAME = Some(build_frame(app.camera, app.width as u32, app.height as u32));
+                app.logger.event(
+                    "TRACE",
+                    "frame_rendered",
+                    format!("width={} height={}", app.width, app.height),
+                );
                 InvalidateRect(window, null(), 0);
             }
             0
@@ -249,6 +257,13 @@ unsafe extern "system" fn window_proc(
                     let center_y = (client.top + client.bottom) / 2;
                     app.yaw += (x - center_x) as f32 * 0.006;
                     app.pitch = (app.pitch - (y - center_y) as f32 * 0.006).clamp(-1.45, 1.45);
+                    if x != center_x || y != center_y {
+                        app.logger.event(
+                            "TRACE",
+                            "mouse_look",
+                            format!("dx={} dy={}", x - center_x, y - center_y),
+                        );
+                    }
                     lock_cursor(window);
                 }
             }
@@ -260,9 +275,15 @@ unsafe extern "system" fn window_proc(
                     app.cursor_locked = false;
                     ClipCursor(null());
                     ShowCursor(1);
+                    app.logger.event("INFO", "cursor_released", "key=escape");
                 }
                 if let Some(key) = key_for(wparam as u32) {
                     app.input.set(key, message == WM_KEYDOWN);
+                    app.logger.event(
+                        "TRACE",
+                        "key_event",
+                        format!("key={} pressed={}", wparam, message == WM_KEYDOWN),
+                    );
                 }
             }
             0
@@ -272,6 +293,8 @@ unsafe extern "system" fn window_proc(
                 app.cursor_locked = true;
                 ShowCursor(0);
                 lock_cursor(window);
+                app.logger
+                    .event("INFO", "cursor_captured", "source=mouse_click");
             }
             0
         }
@@ -315,7 +338,8 @@ unsafe fn lock_cursor(window: Hwnd) {
     }
 }
 
-pub fn run() {
+#[allow(static_mut_refs)]
+pub fn run(logger: Option<Logger>) {
     let width = unsafe { GetSystemMetrics(SM_CXSCREEN) };
     let height = unsafe { GetSystemMetrics(SM_CYSCREEN) };
     unsafe {
@@ -327,7 +351,15 @@ pub fn run() {
             cursor_locked: true,
             width,
             height,
+            logger: logger.unwrap_or_else(|| Logger::start("voxel-engine.log").expect("logger")),
         });
+        if let Some(app) = APP.as_ref() {
+            app.logger.event(
+                "INFO",
+                "window_start",
+                format!("width={} height={}", width, height),
+            );
+        }
         FRAME = Some(build_frame(Camera::default(), width as u32, height as u32));
     }
     let class = wide("VoxelEngineWindow");

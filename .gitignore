@@ -3,6 +3,7 @@
 .horizon-upstream/
 rustcraft.conf
 *.log
+voxel-engine.log
 *.exe
 *.jar
 *.class
