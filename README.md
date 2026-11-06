@@ -56,7 +56,7 @@ Simulation implementation status: `src/simulation.rs` provides a fixed-step cloc
 - Add chunk meshing, face culling, texture/resource loading, and basic lighting.
 - Add frame-time and memory profiling before optimization decisions.
 
-Rendering implementation status: the CPU pipeline is implemented in `src/render.rs`, and `src/window.rs` provides a borderless native Windows presentation surface at the primary monitor's native resolution with a 30 Hz update loop. The cursor is hidden and recentered while captured; Escape releases it and clicking captures it again. Mouse movement controls look, W/A/S/D move the camera, Space moves up, and Ctrl moves down. GPU presentation and a complete game loop remain pending.
+Rendering implementation status: the CPU pipeline is implemented in `src/render.rs`, and `src/window.rs` provides a decorated native Windows window sized to the primary monitor with a 30 Hz update loop. Mouse deltas are measured from the window center, so recentering no longer cancels camera movement. The cursor is hidden while captured; Escape releases it and clicking captures it again. W/A/S/D move the camera, Space moves up, and Ctrl moves down. GPU presentation and a complete game loop remain pending.
 
 ### v0.5 — Developer tooling
 

@@ -27,7 +27,7 @@ const WM_KEYUP: u32 = 0x0101;
 const WM_MOUSEMOVE: u32 = 0x0200;
 const CS_HREDRAW: u32 = 0x0002;
 const CS_VREDRAW: u32 = 0x0001;
-const WS_POPUP: u32 = 0x80000000;
+const WS_OVERLAPPEDWINDOW: u32 = 0x00CF0000;
 const SW_SHOW: i32 = 5;
 const DIB_RGB_COLORS: u32 = 0;
 const SRCCOPY: u32 = 0x00CC0020;
@@ -163,7 +163,6 @@ struct AppState {
     input: InputState,
     yaw: f32,
     pitch: f32,
-    mouse: Option<(i32, i32)>,
     cursor_locked: bool,
     width: i32,
     height: i32,
@@ -236,13 +235,12 @@ unsafe extern "system" fn window_proc(
                 let x = (lparam as u32 & 0xffff) as i16 as i32;
                 let y = ((lparam as u32 >> 16) & 0xffff) as i16 as i32;
                 if app.cursor_locked {
-                    if let Some((last_x, last_y)) = app.mouse {
-                        app.yaw += (x - last_x) as f32 * 0.006;
-                        app.pitch = (app.pitch - (y - last_y) as f32 * 0.006).clamp(-1.45, 1.45);
-                    }
+                    let center_x = app.width / 2;
+                    let center_y = app.height / 2;
+                    app.yaw += (x - center_x) as f32 * 0.006;
+                    app.pitch = (app.pitch - (y - center_y) as f32 * 0.006).clamp(-1.45, 1.45);
                     lock_cursor(window);
                 }
-                app.mouse = Some((x, y));
             }
             0
         }
@@ -311,7 +309,6 @@ pub fn run() {
             input: InputState::default(),
             yaw: -2.16,
             pitch: -0.4,
-            mouse: None,
             cursor_locked: true,
             width,
             height,
@@ -339,7 +336,7 @@ pub fn run() {
             0,
             class.as_ptr(),
             title.as_ptr(),
-            WS_POPUP,
+            WS_OVERLAPPEDWINDOW,
             0,
             0,
             width,
