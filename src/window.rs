@@ -124,6 +124,8 @@ extern "system" {
     fn ClipCursor(rect: *const Rect) -> i32;
     fn ShowCursor(show: i32) -> i32;
     fn GetWindowRect(window: Hwnd, rect: *mut Rect) -> i32;
+    fn GetClientRect(window: Hwnd, rect: *mut Rect) -> i32;
+    fn ClientToScreen(window: Hwnd, point: *mut Point) -> i32;
     fn SetCursorPos(x: i32, y: i32) -> i32;
     fn GetSystemMetrics(index: i32) -> i32;
 }
@@ -236,8 +238,15 @@ unsafe extern "system" fn window_proc(
                 let x = (lparam as u32 & 0xffff) as i16 as i32;
                 let y = ((lparam as u32 >> 16) & 0xffff) as i16 as i32;
                 if app.cursor_locked {
-                    let center_x = app.width / 2;
-                    let center_y = app.height / 2;
+                    let mut client = Rect {
+                        left: 0,
+                        top: 0,
+                        right: app.width,
+                        bottom: app.height,
+                    };
+                    GetClientRect(window, &mut client);
+                    let center_x = (client.left + client.right) / 2;
+                    let center_y = (client.top + client.bottom) / 2;
                     app.yaw += (x - center_x) as f32 * 0.006;
                     app.pitch = (app.pitch - (y - center_y) as f32 * 0.006).clamp(-1.45, 1.45);
                     lock_cursor(window);
@@ -293,10 +302,15 @@ unsafe fn lock_cursor(window: Hwnd) {
         right: 0,
         bottom: 0,
     };
-    if GetWindowRect(window, &mut rect) != 0 {
-        let center_x = (rect.left + rect.right) / 2;
-        let center_y = (rect.top + rect.bottom) / 2;
-        SetCursorPos(center_x, center_y);
+    if GetClientRect(window, &mut rect) != 0 {
+        let mut center = Point {
+            x: (rect.left + rect.right) / 2,
+            y: (rect.top + rect.bottom) / 2,
+        };
+        if ClientToScreen(window, &mut center) != 0 {
+            SetCursorPos(center.x, center.y);
+        }
+        GetWindowRect(window, &mut rect);
         ClipCursor(&rect);
     }
 }
