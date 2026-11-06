@@ -5,6 +5,7 @@ use std::ffi::c_void;
 use std::mem::size_of;
 use std::ptr::{null, null_mut};
 
+use crate::blocks::BlockRegistry;
 use crate::grid::PLAYER_EYE_OFFSET;
 use crate::logger::Logger;
 use crate::movement::{GameMode, MovementInput, PlayerController};
@@ -13,7 +14,7 @@ use crate::render::{
     MaterialRegistry, Mesh, Renderer, Vec3,
 };
 use crate::terrain::{TerrainGenerator, ROCK, SOIL, SURFACE};
-use crate::world::{BlockId, ChunkPos, CHUNK_SIZE};
+use crate::world::{ChunkPos, CHUNK_SIZE};
 
 type Hinstance = *mut c_void;
 type Hwnd = *mut c_void;
@@ -267,10 +268,9 @@ unsafe extern "system" fn window_proc(
                         let lx = x.rem_euclid(CHUNK_SIZE as i32) as usize;
                         let ly = y.rem_euclid(CHUNK_SIZE as i32) as usize;
                         let lz = z.rem_euclid(CHUNK_SIZE as i32) as usize;
-                        scene
-                            .world
-                            .get_chunk(position)
-                            .is_some_and(|chunk| chunk.get(lx, ly, lz).unwrap() != BlockId(0))
+                        scene.world.get_chunk(position).is_some_and(|chunk| {
+                            BlockRegistry::new().is_solid(chunk.get(lx, ly, lz).unwrap())
+                        })
                     });
                     app.logger.event(
                         "TRACE",
@@ -531,9 +531,9 @@ fn build_scene() -> Scene {
                 let lx = local_x.rem_euclid(CHUNK_SIZE as i32) as usize;
                 let ly = local_y.rem_euclid(CHUNK_SIZE as i32) as usize;
                 let lz = local_z.rem_euclid(CHUNK_SIZE as i32) as usize;
-                world
-                    .get_chunk(neighbor)
-                    .is_some_and(|candidate| candidate.get(lx, ly, lz).unwrap() != BlockId(0))
+                world.get_chunk(neighbor).is_some_and(|candidate| {
+                    BlockRegistry::new().is_solid(candidate.get(lx, ly, lz).unwrap())
+                })
             });
             for vertex in &mut mesh.vertices {
                 vertex.position.x += (x * CHUNK_SIZE as i32) as f32;
