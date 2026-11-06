@@ -24,6 +24,10 @@ cargo run --release
 
 Generated builds, local caches, game data, credentials, and external source checkouts are excluded from Git.
 
+## Hermes project agent
+
+Hermes provides a separate terminal prompt and background worker for repository tasks. See `hermes/README.md`, run `codex login`, then use `start-hermes.cmd`. The worker delegates to the installed Codex CLI and does not store ChatGPT credentials. CI runs formatting, tests, and a release build through GitHub Actions.
+
 ## Detailed roadmap
 
 ### v0.2 — Headless world core

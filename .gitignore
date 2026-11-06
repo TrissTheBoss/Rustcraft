@@ -9,3 +9,7 @@ rustcraft.conf
 /fabric-trigger-mod/.gradle/
 /fabric-trigger-mod/build/
 /.fabric-example2/
+/hermes/inbox/
+/hermes/outbox/
+/hermes/state/
+__pycache__/
