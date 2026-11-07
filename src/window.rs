@@ -15,6 +15,7 @@ use crate::grid::PLAYER_EYE_OFFSET;
 use crate::interaction::{
     break_block, place_full_block, raycast_blocks, PROTOTYPE_INTERACTION_REACH,
 };
+use crate::inventory::Inventory;
 use crate::logger::Logger;
 use crate::movement::{GameMode, MovementInput, PlayerController};
 use crate::render::{
@@ -269,6 +270,7 @@ struct AppState {
     gpu: Option<GpuRenderer>,
     last_physics: Instant,
     selected_block: crate::world::BlockId,
+    inventory: Inventory,
     last_jump_press: Option<Instant>,
     jump_was_pressed: bool,
     toggle_flight_pending: bool,
@@ -682,10 +684,13 @@ unsafe extern "system" fn window_proc(
                         format!("key={} pressed={}", wparam, message == WM_KEYDOWN),
                     );
                 }
-                if message == WM_KEYDOWN && (0x31..=0x33).contains(&(wparam as u32)) {
-                    let selected_block = crate::world::BlockId((wparam as u16) - 0x30);
-                    if app.selected_block != selected_block {
-                        app.selected_block = selected_block;
+                if message == WM_KEYDOWN && (0x31..=0x39).contains(&(wparam as u32)) {
+                    let slot = (wparam as usize) - 0x31;
+                    let selection_changed = app.inventory.select_hotbar(slot).is_ok();
+                    if (0x31..=0x33).contains(&(wparam as u32)) {
+                        app.selected_block = crate::world::BlockId((wparam as u16) - 0x30);
+                    }
+                    if selection_changed {
                         if let Some(scene) = SCENE.as_mut() {
                             scene.dirty = true;
                         }
@@ -694,7 +699,7 @@ unsafe extern "system" fn window_proc(
                     app.logger.event(
                         "INFO",
                         "hotbar_select",
-                        format!("slot={} block={name}", wparam - 0x30),
+                        format!("slot={} block={name}", slot + 1),
                     );
                 }
             }
@@ -1756,6 +1761,7 @@ unsafe fn open_world_from_menu(window: Hwnd, app: &mut AppState, id: &str) {
 unsafe fn activate_world(window: Hwnd, app: &mut AppState, saved: crate::world_store::StoredWorld) {
     app.player = player_controller(saved.player, saved.metadata.game_mode);
     app.selected_block = saved.player.selected_block;
+    app.inventory = saved.player.inventory;
     app.yaw = saved.player.yaw;
     app.pitch = saved.player.pitch;
     app.world_metadata = Some(saved.metadata);
@@ -1837,6 +1843,7 @@ pub fn run(logger: Option<Logger>) {
             last_physics: Instant::now(),
             gpu: None,
             selected_block: initial_player.selected_block,
+            inventory: initial_player.inventory,
             last_jump_press: None,
             jump_was_pressed: false,
             toggle_flight_pending: false,
@@ -2204,6 +2211,7 @@ fn current_player_snapshot(app: &AppState) -> PlayerSnapshot {
         flying: app.player.flying,
         grounded: app.player.grounded,
         selected_block: app.selected_block,
+        inventory: app.inventory,
     }
 }
 

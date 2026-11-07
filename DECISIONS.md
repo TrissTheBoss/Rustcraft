@@ -48,7 +48,11 @@ Adventure remains a distinct stored/player mode when a world is reopened. The cu
 
 ## 2026-11-07 â€” Centralize inventory mutations as transactions
 
-The inventory domain owns stack limits, item identity, player slots, equipment compatibility, cursor clicks, transfers, swaps, insertion, and consumption. UI code must call these operations rather than mutating slots directly. Exact transfers and swaps validate before changing either side; insertion may return an explicit remainder, and an inventory menu cannot discard an unreturned cursor stack. This first model is a foundation only: item components, full reference slot semantics, player-save integration, world drops, crafting, and the in-game screen remain to be implemented and verified.
+The inventory domain owns stack limits, item identity, player slots, equipment compatibility, cursor clicks, transfers, swaps, insertion, and consumption. UI code must call these operations rather than mutating slots directly. Exact transfers and swaps validate before changing either side; insertion may return an explicit remainder, and an inventory menu cannot discard an unreturned cursor stack. Save format v3 now persists the model; item components, catalog-specific validation, full reference slot semantics, world drops, crafting, and the in-game screen remain to be implemented and verified.
+
+## 2026-11-07 â€” Persist bounded inventory state in save format v3
+
+Player saves now encode 36 main slots, four armor slots, one offhand slot, item ID/variant/count, and selected hotbar index. The decoder enforces a fixed slot count, bounded stack counts, single-item armor slots, and a valid hotbar index. v1 and v2 saves migrate to empty inventory; their next save writes v3. Catalog-specific item identity/equipment validation must run when content definitions are available, and world-drop transactions are still separate work.
 
 ## 2026-11-07 — Keep world management in the storage boundary
 

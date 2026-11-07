@@ -6,11 +6,13 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::inventory::{Inventory, ItemId, ItemKey, ItemStack, SAVED_SLOT_COUNT};
 use crate::world::{BlockId, World, CHUNK_VOLUME, MAX_SERIALIZED_CHUNKS};
 
 const SAVE_MAGIC_V1: &[u8; 8] = b"VXSAVE01";
 const SAVE_MAGIC_V2: &[u8; 8] = b"VXSAVE02";
-const SAVE_VERSION: u32 = 2;
+const SAVE_MAGIC_V3: &[u8; 8] = b"VXSAVE03";
+const SAVE_VERSION: u32 = 3;
 const SAVE_FILE: &str = "world.vxs";
 const BACKUP_DIR: &str = "backups";
 const MAX_NAME_BYTES: usize = 128;
@@ -87,6 +89,7 @@ pub struct PlayerSnapshot {
     pub flying: bool,
     pub grounded: bool,
     pub selected_block: BlockId,
+    pub inventory: Inventory,
 }
 
 impl Default for PlayerSnapshot {
@@ -99,6 +102,7 @@ impl Default for PlayerSnapshot {
             flying: false,
             grounded: false,
             selected_block: BlockId(1),
+            inventory: Inventory::default(),
         }
     }
 }
@@ -506,7 +510,7 @@ impl WorldStore {
         backup: bool,
         preserved_backup: Option<&str>,
     ) -> io::Result<()> {
-        validate_player(player)?;
+        validate_player(&player)?;
         self.ensure_world_dir(&metadata.id)?;
         let path = self.save_path(&metadata.id)?;
         let mut world_bytes = Vec::new();
@@ -628,7 +632,44 @@ fn valid_backup_name(name: &str) -> bool {
         && !name.contains("..")
 }
 
-fn validate_player(player: PlayerSnapshot) -> io::Result<()> {
+fn write_inventory<W: Write>(output: &mut W, inventory: &Inventory) -> io::Result<()> {
+    output.write_all(&[inventory.selected_hotbar()])?;
+    for slot in inventory.saved_slots() {
+        output.write_all(&[u8::from(slot.is_some())])?;
+        if let Some(stack) = slot {
+            output.write_all(&stack.key.id.0.to_le_bytes())?;
+            output.write_all(&stack.key.variant.to_le_bytes())?;
+            output.write_all(&stack.count.to_le_bytes())?;
+        }
+    }
+    Ok(())
+}
+
+fn read_inventory<R: Read>(input: &mut R) -> io::Result<Inventory> {
+    let mut selected = [0];
+    input.read_exact(&mut selected)?;
+    let mut slots = [None; SAVED_SLOT_COUNT];
+    for slot in &mut slots {
+        if !read_bool(input)? {
+            continue;
+        }
+        let id = ItemId(read_u16(input)?);
+        let variant = read_u32(input)?;
+        let count = read_u16(input)?;
+        *slot = Some(ItemStack {
+            key: ItemKey { id, variant },
+            count,
+        });
+    }
+    Inventory::from_saved_slots(slots, selected[0]).map_err(|error| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("invalid saved inventory: {error}"),
+        )
+    })
+}
+
+fn validate_player(player: &PlayerSnapshot) -> io::Result<()> {
     if !player
         .position
         .iter()
@@ -652,7 +693,7 @@ fn encode_save(
     world_bytes: &[u8],
 ) -> io::Result<Vec<u8>> {
     validate_name(&metadata.name)?;
-    validate_player(player)?;
+    validate_player(&player)?;
     if world_bytes.len() > MAX_SAVE_BYTES {
         return Err(invalid_input("world save exceeds the current size limit"));
     }
@@ -662,7 +703,7 @@ fn encode_save(
     let world_len = u64::try_from(world_bytes.len())
         .map_err(|_| invalid_input("world payload length is invalid"))?;
     let mut output = Vec::with_capacity(world_bytes.len() + 96 + name.len());
-    output.write_all(SAVE_MAGIC_V2)?;
+    output.write_all(SAVE_MAGIC_V3)?;
     output.write_all(&SAVE_VERSION.to_le_bytes())?;
     output.write_all(&name_len.to_le_bytes())?;
     output.write_all(name)?;
@@ -679,6 +720,7 @@ fn encode_save(
     output.write_all(&player.pitch.to_le_bytes())?;
     output.write_all(&[u8::from(player.flying), u8::from(player.grounded)])?;
     output.write_all(&player.selected_block.0.to_le_bytes())?;
+    write_inventory(&mut output, &player.inventory)?;
     output.write_all(&world_len.to_le_bytes())?;
     output.write_all(world_bytes)?;
     output.write_all(&checksum64(&output).to_le_bytes())?;
@@ -699,7 +741,7 @@ fn decode_save(bytes: &[u8], id: &str) -> io::Result<StoredWorld> {
         return Err(invalid_data("world save checksum mismatch"));
     }
     let mut input = Cursor::new(&bytes[..payload_len]);
-    let (metadata, _) = read_metadata(&mut input, id)?;
+    let (metadata, version) = read_metadata(&mut input, id)?;
     let mut player = PlayerSnapshot::default();
     for axis in 0..3 {
         player.position[axis] = read_f64(&mut input)?;
@@ -712,7 +754,10 @@ fn decode_save(bytes: &[u8], id: &str) -> io::Result<StoredWorld> {
     player.flying = read_bool(&mut input)?;
     player.grounded = read_bool(&mut input)?;
     player.selected_block = BlockId(read_u16(&mut input)?);
-    validate_player(player).map_err(|_| invalid_data("invalid player snapshot values"))?;
+    if version >= 3 {
+        player.inventory = read_inventory(&mut input)?;
+    }
+    validate_player(&player).map_err(|_| invalid_data("invalid player snapshot values"))?;
     let world_len = read_u64(&mut input)?;
     let remaining = payload_len.saturating_sub(input.position() as usize);
     if world_len > MAX_SAVE_BYTES as u64 || world_len != remaining as u64 {
@@ -760,6 +805,7 @@ fn read_metadata<R: Read>(input: &mut R, id: &str) -> io::Result<(WorldMetadata,
     let version_matches_magic = match version {
         1 => &magic == SAVE_MAGIC_V1,
         2 => &magic == SAVE_MAGIC_V2,
+        3 => &magic == SAVE_MAGIC_V3,
         _ => false,
     };
     if !version_matches_magic {
@@ -1089,10 +1135,39 @@ mod tests {
         output
     }
 
+    fn encode_v2_fixture(
+        metadata: &WorldMetadata,
+        player: PlayerSnapshot,
+        world_bytes: &[u8],
+    ) -> Vec<u8> {
+        let mut v1 = encode_v1_fixture(metadata, player, world_bytes);
+        let name_len = u16::from_le_bytes([v1[12], v1[13]]) as usize;
+        let mode_end = 14 + name_len + 24 + 1;
+        v1.splice(mode_end..mode_end, [StoredDifficulty::Normal as u8, 0]);
+        v1[..8].copy_from_slice(SAVE_MAGIC_V2);
+        v1[8..12].copy_from_slice(&2u32.to_le_bytes());
+        let payload_len = v1.len() - 8;
+        let checksum = checksum64(&v1[..payload_len]);
+        v1[payload_len..].copy_from_slice(&checksum.to_le_bytes());
+        v1
+    }
+
     #[test]
     fn create_save_load_round_trips_world_and_player_state() {
         let root = TestRoot::new();
         let store = WorldStore::new(&root.0);
+        let mut catalog = crate::inventory::ItemCatalog::default();
+        catalog
+            .register(
+                crate::inventory::ItemId(42),
+                crate::inventory::ItemDefinition::stackable(64),
+            )
+            .unwrap();
+        let mut inventory = Inventory::default();
+        inventory
+            .insert(ItemKey::new(ItemId(42)), 23, &catalog)
+            .unwrap();
+        inventory.select_hotbar(3).unwrap();
         let player = PlayerSnapshot {
             position: [-2.5, 9.25, 33.75],
             velocity: [0.1, -0.2, 0.3],
@@ -1101,6 +1176,7 @@ mod tests {
             flying: true,
             grounded: false,
             selected_block: BlockId(3),
+            inventory,
         };
         let mut saved = store
             .create(
@@ -1121,6 +1197,8 @@ mod tests {
         assert_eq!(loaded.metadata.seed, 42);
         assert_eq!(loaded.metadata.game_mode, StoredGameMode::Creative);
         assert_eq!(loaded.player, player);
+        assert_eq!(loaded.player.inventory.selected_hotbar(), 3);
+        assert_eq!(loaded.player.inventory.count(ItemKey::new(ItemId(42))), 23);
         assert_eq!(loaded.world.block_at([-1, 3, 32]), Some(BlockId(2)));
         assert_eq!(store.list().unwrap()[0].health, WorldHealth::Ready);
     }
@@ -1217,9 +1295,71 @@ mod tests {
             .unwrap();
 
         let upgraded = read_bounded(&save_path).unwrap();
-        assert_eq!(&upgraded[..8], SAVE_MAGIC_V2);
-        assert_eq!(u32::from_le_bytes(upgraded[8..12].try_into().unwrap()), 2);
+        assert_eq!(&upgraded[..8], SAVE_MAGIC_V3);
+        assert_eq!(u32::from_le_bytes(upgraded[8..12].try_into().unwrap()), 3);
         assert_eq!(store.load(&created.metadata.id).unwrap(), loaded);
+    }
+
+    #[test]
+    fn version_two_worlds_load_with_empty_inventory_and_upgrade_to_version_three() {
+        let root = TestRoot::new();
+        let store = WorldStore::new(&root.0);
+        let created = store
+            .create(
+                "Version Two World",
+                24,
+                StoredGameMode::Survival,
+                test_world(),
+                PlayerSnapshot::default(),
+            )
+            .unwrap();
+        let mut world_bytes = Vec::new();
+        created.world.save(&mut world_bytes).unwrap();
+        let legacy = encode_v2_fixture(&created.metadata, created.player, &world_bytes);
+        let save_path = store.save_path(&created.metadata.id).unwrap();
+        atomic_write(&save_path, &legacy).unwrap();
+
+        let mut loaded = store.load(&created.metadata.id).unwrap();
+        assert_eq!(loaded.metadata.difficulty, StoredDifficulty::Normal);
+        assert_eq!(loaded.player.inventory, Inventory::default());
+        store
+            .save(&mut loaded.metadata, &loaded.world, loaded.player)
+            .unwrap();
+
+        let upgraded = read_bounded(&save_path).unwrap();
+        assert_eq!(&upgraded[..8], SAVE_MAGIC_V3);
+        assert_eq!(u32::from_le_bytes(upgraded[8..12].try_into().unwrap()), 3);
+        assert_eq!(store.load(&created.metadata.id).unwrap(), loaded);
+    }
+
+    #[test]
+    fn inventory_decoder_rejects_invalid_selection_counts_and_armor_stacks() {
+        let mut invalid_selection = vec![9];
+        invalid_selection.extend([0; SAVED_SLOT_COUNT]);
+        assert!(read_inventory(&mut Cursor::new(invalid_selection)).is_err());
+
+        let mut zero_count = vec![0, 1];
+        zero_count.extend(7u16.to_le_bytes());
+        zero_count.extend(0u32.to_le_bytes());
+        zero_count.extend(0u16.to_le_bytes());
+        zero_count.extend([0; SAVED_SLOT_COUNT - 1]);
+        assert!(read_inventory(&mut Cursor::new(zero_count)).is_err());
+
+        let mut over_capacity = vec![0, 1];
+        over_capacity.extend(7u16.to_le_bytes());
+        over_capacity.extend(0u32.to_le_bytes());
+        over_capacity.extend(65u16.to_le_bytes());
+        over_capacity.extend([0; SAVED_SLOT_COUNT - 1]);
+        assert!(read_inventory(&mut Cursor::new(over_capacity)).is_err());
+
+        let mut armor_stack = vec![0];
+        armor_stack.extend([0; crate::inventory::MAIN_SLOT_COUNT]);
+        armor_stack.push(1);
+        armor_stack.extend(8u16.to_le_bytes());
+        armor_stack.extend(0u32.to_le_bytes());
+        armor_stack.extend(2u16.to_le_bytes());
+        armor_stack.extend([0; SAVED_SLOT_COUNT - crate::inventory::MAIN_SLOT_COUNT - 1]);
+        assert!(read_inventory(&mut Cursor::new(armor_stack)).is_err());
     }
 
     #[test]

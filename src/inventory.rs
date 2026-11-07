@@ -9,6 +9,7 @@ use std::fmt;
 
 pub const HOTBAR_SLOT_COUNT: usize = 9;
 pub const MAIN_SLOT_COUNT: usize = 36;
+pub(crate) const SAVED_SLOT_COUNT: usize = MAIN_SLOT_COUNT + 5;
 pub const MAX_CATALOG_STACK_SIZE: u16 = 64;
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -143,7 +144,7 @@ impl fmt::Display for InventoryError {
 
 impl std::error::Error for InventoryError {}
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Inventory {
     main: [Option<ItemStack>; MAIN_SLOT_COUNT],
     armor: [Option<ItemStack>; 4],
@@ -177,6 +178,42 @@ impl Inventory {
 
     pub fn selected_stack(&self) -> Option<ItemStack> {
         self.main[self.selected_hotbar as usize]
+    }
+
+    pub(crate) fn saved_slots(&self) -> [Option<ItemStack>; SAVED_SLOT_COUNT] {
+        let mut slots = [None; SAVED_SLOT_COUNT];
+        slots[..MAIN_SLOT_COUNT].copy_from_slice(&self.main);
+        slots[MAIN_SLOT_COUNT..MAIN_SLOT_COUNT + 4].copy_from_slice(&self.armor);
+        slots[MAIN_SLOT_COUNT + 4] = self.offhand;
+        slots
+    }
+
+    pub(crate) fn from_saved_slots(
+        slots: [Option<ItemStack>; SAVED_SLOT_COUNT],
+        selected_hotbar: u8,
+    ) -> Result<Self, InventoryError> {
+        if usize::from(selected_hotbar) >= HOTBAR_SLOT_COUNT {
+            return Err(InventoryError::InvalidSlot);
+        }
+        for (index, stack) in slots.iter().enumerate() {
+            let Some(stack) = stack else {
+                continue;
+            };
+            if stack.count == 0
+                || stack.count > MAX_CATALOG_STACK_SIZE
+                || ((MAIN_SLOT_COUNT..MAIN_SLOT_COUNT + 4).contains(&index) && stack.count != 1)
+            {
+                return Err(InventoryError::InvalidCount);
+            }
+        }
+        let main = std::array::from_fn(|index| slots[index]);
+        let armor = std::array::from_fn(|index| slots[MAIN_SLOT_COUNT + index]);
+        Ok(Self {
+            main,
+            armor,
+            offhand: slots[MAIN_SLOT_COUNT + 4],
+            selected_hotbar,
+        })
     }
 
     pub fn stack(&self, slot: InventorySlot) -> Result<Option<ItemStack>, InventoryError> {
