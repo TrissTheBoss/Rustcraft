@@ -50,6 +50,10 @@ World rename, copy, and delete operations belong to `WorldStore`, so UI actions 
 
 Backup recovery reads and validates the selected snapshot before mutating the active save, pins that snapshot while retention prunes older files, and backs up the current in-memory world/player state before replacing the save. The prototype menu requires explicit confirmation, filters invalid backups from the choices, and reloads the active scene after a successful restore. The current workflow replaces the selected world's contents in place; preview and restore-as-copy remain requirements for the finished world-management experience.
 
+## 2026-11-07 — Collect world creation options before generation
+
+The prototype now collects a validated name, optional decimal/hex seed, and one of the currently exposed Survival, Creative, or Spectator modes before generating terrain. A blank seed is randomized. The simulation pauses while the native form is open, and the current dirty world must save before the new world becomes active. Difficulty, generator customization, Adventure rules, and the full cross-platform menu remain unimplemented; incomplete mode systems are not represented as finished parity.
+
 ## 2026-11-06 — Keep rendering core dependency-free until graphics dependencies are available
 
 Implement the renderer-facing contracts and CPU rasterizer using the standard library so meshing, camera math, texture resources, lighting, and profiling can be exercised offline. The window/GPU adapter remains pending; do not represent the rendering milestone as complete until an interactive surface and GPU presentation path are integrated and verified.

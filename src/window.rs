@@ -57,6 +57,26 @@ const MENU_COPY_WORLD_BASE: usize = 3000;
 const MENU_DELETE_WORLD_BASE: usize = 4000;
 const MENU_RESTORE_BACKUP_BASE: usize = 5000;
 const MENU_RESTORE_BACKUP_CAPACITY: usize = 2500;
+const FORM_WORLD_NAME: usize = 1101;
+const FORM_WORLD_SEED: usize = 1102;
+const FORM_WORLD_MODE: usize = 1103;
+const FORM_WORLD_ERROR: usize = 1104;
+const FORM_WORLD_CREATE: usize = 1105;
+const FORM_WORLD_CANCEL: usize = 1106;
+const DIALOG_IDOK: usize = 1;
+const DIALOG_IDCANCEL: usize = 2;
+const CB_ADDSTRING: u32 = 0x0143;
+const CB_SETCURSEL: u32 = 0x014E;
+const CB_GETCURSEL: u32 = 0x0147;
+const EM_SETLIMITTEXT: u32 = 0x00C5;
+const WS_CHILD: u32 = 0x4000_0000;
+const WS_VISIBLE: u32 = 0x1000_0000;
+const WS_TABSTOP: u32 = 0x0001_0000;
+const ES_AUTOHSCROLL: u32 = 0x0080;
+const CBS_DROPDOWNLIST: u32 = 0x0003;
+const SS_WHITERECT: u32 = 0x0006;
+const BS_DEFPUSHBUTTON: u32 = 0x0001;
+const BS_PUSHBUTTON: u32 = 0x0000;
 const IDYES: i32 = 6;
 const MB_YESNO: u32 = 0x0004;
 const MB_ICONWARNING: u32 = 0x0030;
@@ -165,6 +185,11 @@ extern "system" {
     fn DestroyMenu(menu: *mut c_void) -> i32;
     fn PostMessageW(window: Hwnd, message: u32, wparam: Wparam, lparam: Lparam) -> i32;
     fn MessageBoxW(window: Hwnd, text: *const u16, caption: *const u16, flags: u32) -> i32;
+    fn SendMessageW(window: Hwnd, message: u32, wparam: Wparam, lparam: Lparam) -> Lresult;
+    fn GetWindowTextLengthW(window: Hwnd) -> i32;
+    fn GetWindowTextW(window: Hwnd, text: *mut u16, max_chars: i32) -> i32;
+    fn SetFocus(window: Hwnd) -> Hwnd;
+    fn IsDialogMessageW(window: Hwnd, message: *const Message) -> i32;
     fn DrawMenuBar(window: Hwnd) -> i32;
     fn DestroyWindow(window: Hwnd) -> i32;
     fn ClipCursor(rect: *const Rect) -> i32;
@@ -207,6 +232,7 @@ struct Message {
 static mut FRAME: Option<(Vec<u8>, BitmapInfo)> = None;
 static mut APP: Option<AppState> = None;
 static mut SCENE: Option<Scene> = None;
+static mut WORLD_FORM: Option<WorldCreationForm> = None;
 
 struct Scene {
     world: crate::world::World,
@@ -241,7 +267,16 @@ struct AppState {
     world_metadata: Option<WorldMetadata>,
     menu_world_ids: Vec<String>,
     menu_restore_actions: Vec<(String, String)>,
+    dialog_open: bool,
     last_save: Instant,
+}
+
+struct WorldCreationForm {
+    controls: Vec<Hwnd>,
+    name_edit: Hwnd,
+    seed_edit: Hwnd,
+    mode_combo: Hwnd,
+    error_label: Hwnd,
 }
 
 const MF_STRING: u32 = 0x0000;
@@ -263,6 +298,26 @@ unsafe extern "system" fn window_proc(
     match message {
         WM_COMMAND => {
             let command = wparam & 0xffff;
+            if WORLD_FORM.is_some() && command == DIALOG_IDCANCEL {
+                close_world_creation_form(window);
+                return 0;
+            }
+            if WORLD_FORM.is_some() && command == DIALOG_IDOK {
+                submit_world_creation_form(window);
+                return 0;
+            }
+            if command == FORM_WORLD_CANCEL {
+                close_world_creation_form(window);
+                return 0;
+            }
+            if command == FORM_WORLD_CREATE {
+                submit_world_creation_form(window);
+                return 0;
+            }
+            if command == MENU_CREATE_WORLD {
+                open_world_creation_form(window);
+                return 0;
+            }
             if (MENU_RESTORE_BACKUP_BASE..MENU_RESTORE_BACKUP_BASE + MENU_RESTORE_BACKUP_CAPACITY)
                 .contains(&command)
             {
@@ -306,7 +361,6 @@ unsafe extern "system" fn window_proc(
                             }
                         }
                     }
-                    MENU_CREATE_WORLD => create_world_from_menu(window, app),
                     MENU_QUIT => {
                         PostMessageW(window, WM_CLOSE, 0, 0);
                     }
@@ -389,7 +443,7 @@ unsafe extern "system" fn window_proc(
         WM_ERASEBKGND => 1,
         WM_TIMER => {
             if let Some(app) = APP.as_mut() {
-                if wparam == TIMER_ID {
+                if wparam == TIMER_ID && !app.dialog_open {
                     app.logger.event("TRACE", "timer_tick", "interval_ms=50");
                     if let Some(scene) = SCENE.as_ref() {
                         let previous_transform = app.player.transform;
@@ -618,6 +672,9 @@ unsafe extern "system" fn window_proc(
         }
         WM_LBUTTONDOWN => {
             if let Some(app) = APP.as_mut() {
+                if app.dialog_open {
+                    return 0;
+                }
                 if app.cursor_locked {
                     queue_block_action(app, true);
                     return 0;
@@ -632,6 +689,9 @@ unsafe extern "system" fn window_proc(
         }
         WM_RBUTTONDOWN => {
             if let Some(app) = APP.as_mut() {
+                if app.dialog_open {
+                    return 0;
+                }
                 if app.cursor_locked {
                     queue_block_action(app, false);
                     return 0;
@@ -645,6 +705,7 @@ unsafe extern "system" fn window_proc(
             0
         }
         WM_DESTROY => {
+            destroy_world_creation_form();
             if let (Some(app), Some(scene)) = (APP.as_mut(), SCENE.as_mut()) {
                 while let Some(breaking) = app.pending_block_actions.pop_front() {
                     handle_block_action(app, scene, breaking);
@@ -839,59 +900,375 @@ unsafe fn install_main_menu(window: Hwnd, app: &mut AppState) {
 }
 
 #[allow(static_mut_refs)]
-unsafe fn create_world_from_menu(window: Hwnd, app: &mut AppState) {
+unsafe fn create_form_control(
+    parent: Hwnd,
+    class_name: &str,
+    label: &str,
+    style: u32,
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+    id: usize,
+) -> Hwnd {
+    let class = wide(class_name);
+    let label = wide(label);
+    CreateWindowExW(
+        0,
+        class.as_ptr(),
+        label.as_ptr(),
+        WS_CHILD | WS_VISIBLE | style,
+        x,
+        y,
+        width,
+        height,
+        parent,
+        if id == 0 {
+            null_mut()
+        } else {
+            id as *mut c_void
+        },
+        GetModuleHandleW(null()),
+        null_mut(),
+    )
+}
+
+unsafe fn add_form_label(
+    parent: Hwnd,
+    controls: &mut Vec<Hwnd>,
+    text: &str,
+    left: i32,
+    top: i32,
+    y: i32,
+) -> Hwnd {
+    let control = create_form_control(parent, "STATIC", text, 0, left + 24, top + y, 412, 22, 0);
+    controls.push(control);
+    control
+}
+
+#[allow(static_mut_refs)]
+unsafe fn open_world_creation_form(window: Hwnd) {
+    if WORLD_FORM.is_some() {
+        return;
+    }
+    let Some(store) = APP.as_ref().and_then(|app| app.world_store.clone()) else {
+        if let Some(app) = APP.as_ref() {
+            app.logger.event(
+                "ERROR",
+                "world_create_unavailable",
+                "world storage is unavailable",
+            );
+        }
+        return;
+    };
+    let name = match store.list().and_then(|worlds| {
+        let names = worlds
+            .into_iter()
+            .filter_map(|world| world.name)
+            .collect::<std::collections::BTreeSet<_>>();
+        (1..)
+            .map(|number| format!("New World {number}"))
+            .find(|candidate| !names.contains(candidate))
+            .ok_or_else(|| std::io::Error::other("could not choose a world name"))
+    }) {
+        Ok(name) => name,
+        Err(error) => {
+            if let Some(app) = APP.as_ref() {
+                app.logger
+                    .event("ERROR", "world_create_failed", error.to_string());
+            }
+            return;
+        }
+    };
+    let mut client = Rect {
+        left: 0,
+        top: 0,
+        right: 0,
+        bottom: 0,
+    };
+    GetClientRect(window, &mut client);
+    let left = ((client.right - 460) / 2).max(12);
+    let top = ((client.bottom - 360) / 2).max(12);
+    let panel = create_form_control(window, "STATIC", "", SS_WHITERECT, left, top, 460, 360, 0);
+    let mut controls = vec![panel];
+    add_form_label(window, &mut controls, "Create World", left, top, 18);
+    add_form_label(window, &mut controls, "World name", left, top, 52);
+    let name_edit = create_form_control(
+        window,
+        "EDIT",
+        &name,
+        ES_AUTOHSCROLL | WS_TABSTOP,
+        left + 24,
+        top + 75,
+        412,
+        26,
+        FORM_WORLD_NAME,
+    );
+    controls.push(name_edit);
+    SendMessageW(name_edit, EM_SETLIMITTEXT, 128, 0);
+    add_form_label(
+        window,
+        &mut controls,
+        "Seed (blank chooses a random seed; decimal or 0x hexadecimal)",
+        left,
+        top,
+        111,
+    );
+    let seed_edit = create_form_control(
+        window,
+        "EDIT",
+        "",
+        ES_AUTOHSCROLL | WS_TABSTOP,
+        left + 24,
+        top + 134,
+        412,
+        26,
+        FORM_WORLD_SEED,
+    );
+    controls.push(seed_edit);
+    SendMessageW(seed_edit, EM_SETLIMITTEXT, 64, 0);
+    add_form_label(window, &mut controls, "Game mode", left, top, 170);
+    let mode_combo = create_form_control(
+        window,
+        "COMBOBOX",
+        "",
+        CBS_DROPDOWNLIST | WS_TABSTOP,
+        left + 24,
+        top + 193,
+        412,
+        130,
+        FORM_WORLD_MODE,
+    );
+    controls.push(mode_combo);
+    let survival = wide("Survival");
+    let creative = wide("Creative");
+    let spectator = wide("Spectator");
+    SendMessageW(mode_combo, CB_ADDSTRING, 0, survival.as_ptr() as isize);
+    SendMessageW(mode_combo, CB_ADDSTRING, 0, creative.as_ptr() as isize);
+    SendMessageW(mode_combo, CB_ADDSTRING, 0, spectator.as_ptr() as isize);
+    SendMessageW(mode_combo, CB_SETCURSEL, 1, 0);
+    add_form_label(
+        window,
+        &mut controls,
+        "Prototype: gameplay and mode rules are still incomplete.",
+        left,
+        top,
+        229,
+    );
+    let error_label = create_form_control(
+        window,
+        "STATIC",
+        "",
+        0,
+        left + 24,
+        top + 254,
+        412,
+        22,
+        FORM_WORLD_ERROR,
+    );
+    controls.push(error_label);
+    let cancel = create_form_control(
+        window,
+        "BUTTON",
+        "Cancel",
+        BS_PUSHBUTTON | WS_TABSTOP,
+        left + 224,
+        top + 300,
+        100,
+        30,
+        FORM_WORLD_CANCEL,
+    );
+    controls.push(cancel);
+    let create = create_form_control(
+        window,
+        "BUTTON",
+        "Create World",
+        BS_DEFPUSHBUTTON | WS_TABSTOP,
+        left + 336,
+        top + 300,
+        100,
+        30,
+        FORM_WORLD_CREATE,
+    );
+    controls.push(create);
+    if controls.iter().any(|control| control.is_null()) {
+        for control in controls
+            .into_iter()
+            .rev()
+            .filter(|control| !control.is_null())
+        {
+            DestroyWindow(control);
+        }
+        if let Some(app) = APP.as_mut() {
+            app.logger
+                .event("ERROR", "world_form_failed", "a native form control failed");
+        }
+        return;
+    }
+    WORLD_FORM = Some(WorldCreationForm {
+        controls,
+        name_edit,
+        seed_edit,
+        mode_combo,
+        error_label,
+    });
+    if let Some(app) = APP.as_mut() {
+        app.dialog_open = true;
+        app.input.clear();
+        app.toggle_flight_pending = false;
+        if app.cursor_locked {
+            app.cursor_locked = false;
+            ClipCursor(null());
+            ShowCursor(1);
+        }
+    }
+    SetFocus(name_edit);
+}
+
+unsafe fn form_control_text(window: Hwnd) -> String {
+    let length = GetWindowTextLengthW(window).max(0) as usize;
+    let mut text = vec![0u16; length + 1];
+    let count = GetWindowTextW(window, text.as_mut_ptr(), text.len() as i32).max(0) as usize;
+    String::from_utf16_lossy(&text[..count])
+}
+
+fn optional_seed(text: &str) -> Result<u64, ()> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Ok(std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_nanos() as u64)
+            .unwrap_or(1));
+    }
+    if let Some(hex) = text.strip_prefix("0x").or_else(|| text.strip_prefix("0X")) {
+        u64::from_str_radix(hex, 16).map_err(|_| ())
+    } else {
+        text.parse::<u64>().map_err(|_| ())
+    }
+}
+
+#[cfg(test)]
+mod world_creation_tests {
+    use super::optional_seed;
+
+    #[test]
+    fn seed_field_accepts_decimal_and_hex_and_rejects_invalid_values() {
+        assert_eq!(optional_seed("42"), Ok(42));
+        assert_eq!(optional_seed(" 0x2a "), Ok(42));
+        assert_eq!(optional_seed("0XFF"), Ok(255));
+        assert!(optional_seed("-1").is_err());
+        assert!(optional_seed("0xzz").is_err());
+        assert!(optional_seed("18446744073709551616").is_err());
+    }
+
+    #[test]
+    fn blank_seed_generates_a_value() {
+        assert!(optional_seed("").unwrap() > 0);
+        assert!(optional_seed("   ").unwrap() > 0);
+    }
+}
+
+#[allow(static_mut_refs)]
+unsafe fn close_world_creation_form(window: Hwnd) {
+    destroy_world_creation_form();
+    if let Some(app) = APP.as_mut() {
+        app.dialog_open = false;
+        app.input.clear();
+        app.last_physics = Instant::now();
+    }
+    SetFocus(window);
+    InvalidateRect(window, null(), 0);
+}
+
+#[allow(static_mut_refs)]
+unsafe fn destroy_world_creation_form() {
+    if let Some(form) = WORLD_FORM.take() {
+        for control in form.controls.into_iter().rev() {
+            if !control.is_null() {
+                DestroyWindow(control);
+            }
+        }
+    }
+}
+
+#[allow(static_mut_refs)]
+unsafe fn submit_world_creation_form(window: Hwnd) {
+    let Some((name_edit, seed_edit, mode_combo, error_label)) = WORLD_FORM.as_ref().map(|form| {
+        (
+            form.name_edit,
+            form.seed_edit,
+            form.mode_combo,
+            form.error_label,
+        )
+    }) else {
+        return;
+    };
+    let name = form_control_text(name_edit);
+    let seed = match optional_seed(&form_control_text(seed_edit)) {
+        Ok(seed) => seed,
+        Err(()) => {
+            let error = wide("Seed must be an unsigned decimal or 0x hexadecimal value.");
+            SetWindowTextW(error_label, error.as_ptr());
+            return;
+        }
+    };
+    let selected_mode = SendMessageW(mode_combo, CB_GETCURSEL, 0, 0);
+    let mode = match selected_mode {
+        0 => StoredGameMode::Survival,
+        1 => StoredGameMode::Creative,
+        2 => StoredGameMode::Spectator,
+        _ => {
+            let error = wide("Choose a supported game mode.");
+            SetWindowTextW(error_label, error.as_ptr());
+            return;
+        }
+    };
+    let Some(app) = APP.as_mut() else {
+        return;
+    };
+    let Some(store) = app.world_store.clone() else {
+        let error = wide("World storage is unavailable.");
+        SetWindowTextW(error_label, error.as_ptr());
+        return;
+    };
     if let Some(scene) = SCENE.as_mut() {
         if scene.dirty {
-            if let Err(error) = persist_world(app, scene) {
+            if let Err(save_error) = persist_world(app, scene) {
                 app.logger.event(
                     "ERROR",
-                    "world_switch_blocked_by_save_failure",
-                    error.to_string(),
+                    "world_create_blocked_by_save_failure",
+                    save_error.to_string(),
                 );
+                let error = wide("The current world could not be saved. Creation was cancelled.");
+                SetWindowTextW(error_label, error.as_ptr());
                 return;
             }
         }
     }
-    let Some(store) = app.world_store.clone() else {
-        app.logger.event(
-            "ERROR",
-            "world_create_unavailable",
-            "world storage is unavailable",
-        );
-        return;
-    };
-    let seed = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_nanos() as u64)
-        .unwrap_or(1);
-    let defaults = TerrainGenerator::default();
-    let world = TerrainGenerator { seed, ..defaults }.generate_region(2);
-    let name = match store.list() {
-        Ok(worlds) => format!("New World {}", worlds.len() + 1),
-        Err(error) => {
-            app.logger
-                .event("ERROR", "world_create_failed", error.to_string());
-            return;
-        }
-    };
-    match store.create(
-        &name,
+    let generator = TerrainGenerator {
         seed,
-        StoredGameMode::Creative,
-        world,
-        PlayerSnapshot::default(),
-    ) {
+        ..TerrainGenerator::default()
+    };
+    let world = generator.generate_region(2);
+    match store.create(&name, seed, mode, world, PlayerSnapshot::default()) {
         Ok(created) => {
             app.logger.event(
                 "INFO",
                 "world_created",
-                format!("id={} seed={seed}", created.metadata.id),
+                format!("id={} seed={seed} mode={mode:?}", created.metadata.id),
             );
+            destroy_world_creation_form();
+            app.dialog_open = false;
+            app.input.clear();
+            app.last_physics = Instant::now();
             activate_world(window, app, created);
         }
-        Err(error) => app
-            .logger
-            .event("ERROR", "world_create_failed", error.to_string()),
+        Err(error) => {
+            app.logger
+                .event("ERROR", "world_create_failed", error.to_string());
+            let error = wide(&error.to_string());
+            SetWindowTextW(error_label, error.as_ptr());
+        }
     }
 }
 
@@ -1220,6 +1597,7 @@ pub fn run(logger: Option<Logger>) {
             world_metadata,
             menu_world_ids: Vec::new(),
             menu_restore_actions: Vec::new(),
+            dialog_open: false,
             last_save: Instant::now(),
             player,
         });
@@ -1300,6 +1678,9 @@ pub fn run(logger: Option<Logger>) {
             private: 0,
         };
         while GetMessageW(&mut message, null_mut(), 0, 0) > 0 {
+            if WORLD_FORM.is_some() && IsDialogMessageW(window, &message) != 0 {
+                continue;
+            }
             TranslateMessage(&message);
             DispatchMessageW(&message);
         }
