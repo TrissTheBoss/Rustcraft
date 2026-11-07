@@ -3,6 +3,7 @@ pub mod asset_extract;
 pub mod blocks;
 pub mod drops;
 pub mod entity;
+pub mod food_use;
 #[cfg(windows)]
 pub mod gpu;
 pub mod grid;

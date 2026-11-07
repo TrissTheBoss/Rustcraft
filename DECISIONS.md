@@ -144,3 +144,5 @@ Use an elapsed-time accumulator to run movement on a 20 Hz fixed step when rende
 ## 2026-11-07 - Use original textured Win32 menu controls
 
 Native modal panels and push buttons are owner-drawn with small generated pixel patterns, an original charcoal/slate palette, focus/pressed/disabled button states, and high-contrast static labels. The pattern brushes are generated once in memory so shell UI never depends on extracted game assets or external art files. Checkbox, text-entry, and combo-box semantics remain native while their parent panels use the same visual system. This is a functional visual foundation, not the final accessibility or 26.3 screen-parity implementation.
+## 2026-11-07 - Transactional fixed-tick food use
+An original Prototype Ration (item 11) exercises the item-use lifecycle independently of placeable blocks. A session binds progress to the selected slot and item key; after 32 held ticks it validates restoration, consumes one stack item, and commits bounded food state. The existing save format already persists both results. All values are provisional; exact reference food components and rates need captured conformance fixtures.

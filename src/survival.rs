@@ -62,6 +62,21 @@ impl FoodState {
         self.exhaustion_milli
     }
 
+    pub fn eat(&mut self, nutrition: u8, saturation_milli: u16) -> bool {
+        if nutrition == 0 || self.food_level == MAX_FOOD_LEVEL {
+            return false;
+        }
+        self.food_level = self
+            .food_level
+            .saturating_add(nutrition)
+            .min(MAX_FOOD_LEVEL);
+        self.saturation_milli = self
+            .saturation_milli
+            .saturating_add(saturation_milli)
+            .min(u16::from(self.food_level) * 1_000);
+        true
+    }
+
     /// Apply accumulated exhaustion in fixed point, preserving fractional
     /// progress and consuming saturation before food. Activity sources are
     /// deliberately supplied by the caller so their reference rates can be

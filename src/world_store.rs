@@ -1548,6 +1548,47 @@ mod tests {
     }
 
     #[test]
+    fn consumed_food_and_remaining_rations_survive_reload() {
+        let root = TestRoot::new();
+        let store = WorldStore::new(&root.0);
+        let mut catalog = crate::inventory::ItemCatalog::default();
+        catalog
+            .register(
+                ItemId(crate::food_use::RATION_ITEM_ID),
+                crate::inventory::ItemDefinition::stackable(64),
+            )
+            .unwrap();
+        let mut player = PlayerSnapshot::default();
+        player
+            .inventory
+            .insert(
+                ItemKey::new(ItemId(crate::food_use::RATION_ITEM_ID)),
+                2,
+                &catalog,
+            )
+            .unwrap();
+        player.food = crate::survival::FoodState::from_saved(12, 0, 123).unwrap();
+        let mut session = crate::food_use::FoodUseSession::default();
+        for _ in 0..crate::food_use::RATION_USE_TICKS {
+            session.tick(true, &mut player.inventory, &mut player.food);
+        }
+        assert_eq!(player.food.food_level(), 16);
+        assert_eq!(player.inventory.selected_stack().unwrap().count, 1);
+        let saved = store
+            .create(
+                "Food transaction",
+                9,
+                StoredGameMode::Survival,
+                test_world(),
+                player.clone(),
+            )
+            .unwrap();
+        let loaded = store.load(&saved.metadata.id).unwrap();
+        assert_eq!(loaded.player.food, player.food);
+        assert_eq!(loaded.player.inventory, player.inventory);
+    }
+
+    #[test]
     fn create_save_load_round_trips_world_and_player_state() {
         let root = TestRoot::new();
         let store = WorldStore::new(&root.0);

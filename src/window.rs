@@ -102,7 +102,7 @@ const INVENTORY_DROP_ID: usize = INVENTORY_MODE_ID + 1;
 const INVENTORY_CLOSE_ID: usize = INVENTORY_DROP_ID + 1;
 const INVENTORY_CATALOG_SEARCH_ID: usize = 8200;
 const INVENTORY_CATALOG_ITEM_ID_BASE: usize = 8210;
-const INVENTORY_CATALOG_ITEM_COUNT: usize = 10;
+const INVENTORY_CATALOG_ITEM_COUNT: usize = 11;
 const PAUSE_RESUME_ID: usize = 8100;
 const PAUSE_SAVE_QUIT_ID: usize = PAUSE_RESUME_ID + 1;
 const PAUSE_OPTIONS_ID: usize = PAUSE_SAVE_QUIT_ID + 1;
@@ -157,6 +157,7 @@ const VK_Q: u32 = 0x51;
 const WM_LBUTTONDOWN: u32 = 0x0201;
 const WM_LBUTTONUP: u32 = 0x0202;
 const WM_RBUTTONDOWN: u32 = 0x0204;
+const WM_RBUTTONUP: u32 = 0x0205;
 const WM_MBUTTONDOWN: u32 = 0x0207;
 const WM_KILLFOCUS: u32 = 0x0008;
 // The CPU renderer is supersampled 2x in each axis below. Keep the presented
@@ -399,6 +400,8 @@ struct AppState {
     mining_catalog: MiningCatalog,
     mining_session: MiningSession,
     breaking_held: bool,
+    food_use_held: bool,
+    food_use: crate::food_use::FoodUseSession,
     sprint_toggled: bool,
     sneak_toggled: bool,
     last_jump_press: Option<Instant>,
@@ -870,6 +873,22 @@ unsafe extern "system" fn window_proc(
                                     handle_block_action(app, scene, breaking);
                                 }
                             }
+                            if app.food_use.tick(
+                                app.food_use_held
+                                    && !app.vitals.is_dead()
+                                    && matches!(
+                                        app.player.mode,
+                                        GameMode::Survival | GameMode::Adventure
+                                    ),
+                                &mut app.inventory,
+                                &mut app.food,
+                            ) {
+                                if let Some(scene) = SCENE.as_mut() {
+                                    scene.dirty = true;
+                                }
+                                app.logger
+                                    .event("INFO", "food_consumed", "item=prototype_ration");
+                            }
                             let mining_target =
                                 if app.player.mode == GameMode::Survival && app.breaking_held {
                                     SCENE
@@ -1282,6 +1301,8 @@ unsafe extern "system" fn window_proc(
         WM_KILLFOCUS => {
             if let Some(app) = APP.as_mut() {
                 app.input.clear();
+                app.food_use_held = false;
+                app.food_use.reset();
                 app.jump_was_pressed = false;
                 app.breaking_held = false;
                 app.mining_session.reset();
@@ -1341,7 +1362,15 @@ unsafe extern "system" fn window_proc(
                     return 0;
                 }
                 if app.cursor_locked {
-                    queue_block_action(app, false);
+                    if app
+                        .inventory
+                        .selected_stack()
+                        .is_some_and(|stack| crate::food_use::is_food(stack.key))
+                    {
+                        app.food_use_held = true;
+                    } else {
+                        queue_block_action(app, false);
+                    }
                     return 0;
                 }
                 app.cursor_locked = true;
@@ -1349,6 +1378,13 @@ unsafe extern "system" fn window_proc(
                 lock_cursor(window);
                 app.logger
                     .event("INFO", "cursor_captured", "source=mouse_click");
+            }
+            0
+        }
+        WM_RBUTTONUP => {
+            if let Some(app) = APP.as_mut() {
+                app.food_use_held = false;
+                app.food_use.reset();
             }
             0
         }
@@ -1728,6 +1764,8 @@ unsafe fn open_title_form(window: Hwnd) {
     if let Some(app) = APP.as_mut() {
         app.dialog_open = true;
         app.input.clear();
+        app.food_use_held = false;
+        app.food_use.reset();
         app.breaking_held = false;
         app.mining_session.reset();
         app.last_physics = Instant::now();
@@ -1764,12 +1802,16 @@ unsafe fn close_title_form(window: Hwnd, enter_game: bool) {
         if enter_game && app.vitals.is_dead() {
             app.dialog_open = true;
             app.input.clear();
+            app.food_use_held = false;
+            app.food_use.reset();
             app.last_physics = Instant::now();
             PostMessageW(window, WM_APP_DEATH, 0, 0);
             return;
         }
         app.dialog_open = false;
         app.input.clear();
+        app.food_use_held = false;
+        app.food_use.reset();
         app.last_physics = Instant::now();
         if enter_game {
             app.cursor_locked = true;
@@ -1914,11 +1956,12 @@ fn inventory_item_name(item: ItemId) -> String {
         8 => "Path".to_owned(),
         9 => "Fence".to_owned(),
         10 => "Pane".to_owned(),
+        11 => "Prototype Ration".to_owned(),
         id => format!("Unknown Item {id}"),
     }
 }
 
-fn matching_creative_blocks(query: &str) -> Vec<u16> {
+fn matching_creative_items(query: &str) -> Vec<u16> {
     let query = query.trim().to_lowercase();
     (1..=INVENTORY_CATALOG_ITEM_COUNT as u16)
         .filter(|id| {
@@ -1994,7 +2037,7 @@ unsafe fn refresh_inventory_form() {
         }
         let text = wide(&cursor_text);
         SetWindowTextW(cursor_label, text.as_ptr());
-        let visible = matching_creative_blocks(&form_control_text(catalog_search));
+        let visible = matching_creative_items(&form_control_text(catalog_search));
         let catalog_enabled = app.player.mode == GameMode::Creative;
         if let Some(form) = INVENTORY_FORM.as_mut() {
             form.catalog_visible = visible
@@ -2178,6 +2221,8 @@ unsafe fn open_pause_form_with_capture(
         app.breaking_held = false;
         app.mining_session.reset();
         app.input.clear();
+        app.food_use_held = false;
+        app.food_use.reset();
         app.last_physics = Instant::now();
         app.logger.event("INFO", "pause_opened", "source=escape");
     } else {
@@ -2339,6 +2384,8 @@ unsafe fn save_and_return_to_title(window: Hwnd) {
         app.dialog_open = false;
         app.cursor_locked = false;
         app.input.clear();
+        app.food_use_held = false;
+        app.food_use.reset();
         app.last_physics = Instant::now();
         app.logger
             .event("INFO", "pause_return_title", "world_saved=true");
@@ -2373,6 +2420,8 @@ unsafe fn save_and_quit_from_pause(window: Hwnd) {
         app.dialog_open = false;
         app.cursor_locked = false;
         app.input.clear();
+        app.food_use_held = false;
+        app.food_use.reset();
         app.logger
             .event("INFO", "pause_save_quit", "world_saved=true");
     }
@@ -2393,6 +2442,8 @@ unsafe fn close_pause_form(window: Hwnd) {
         app.dialog_open = false;
         app.cursor_locked = false;
         app.input.clear();
+        app.food_use_held = false;
+        app.food_use.reset();
         app.last_physics = Instant::now();
         app.logger.event("INFO", "pause_closed", "action=resume");
         if restore_cursor {
@@ -2521,6 +2572,8 @@ unsafe fn open_death_form(window: Hwnd) {
     if let Some(app) = APP.as_mut() {
         app.dialog_open = true;
         app.input.clear();
+        app.food_use_held = false;
+        app.food_use.reset();
         app.death_items_retained = false;
         app.breaking_held = false;
         app.mining_session.reset();
@@ -2621,6 +2674,8 @@ unsafe fn respawn_player(window: Hwnd) {
     if let Some(app) = APP.as_mut() {
         app.dialog_open = false;
         app.input.clear();
+        app.food_use_held = false;
+        app.food_use.reset();
         app.last_physics = Instant::now();
         app.cursor_locked = true;
     }
@@ -2887,6 +2942,8 @@ unsafe fn open_options_form(window: Hwnd, return_to_title: bool) {
     if let Some(app) = APP.as_mut() {
         app.dialog_open = true;
         app.input.clear();
+        app.food_use_held = false;
+        app.food_use.reset();
         app.last_physics = Instant::now();
     }
     if !field_of_view_edit.is_null() {
@@ -3019,6 +3076,8 @@ unsafe fn apply_options_form(window: Hwnd) {
     if let Some(app) = APP.as_mut() {
         app.settings = settings;
         app.input.clear();
+        app.food_use_held = false;
+        app.food_use.reset();
         app.sprint_toggled = false;
         app.sneak_toggled = false;
         app.jump_was_pressed = false;
@@ -3291,7 +3350,7 @@ unsafe fn open_inventory_form(window: Hwnd) {
     let catalog_label = create_form_control(
         window,
         "STATIC",
-        "Creative Catalog - prototype blocks",
+        "Creative Catalog - prototype items",
         0,
         left + 760,
         top + 42,
@@ -3415,6 +3474,8 @@ unsafe fn open_inventory_form(window: Hwnd) {
     if let Some(app) = APP.as_mut() {
         app.dialog_open = true;
         app.input.clear();
+        app.food_use_held = false;
+        app.food_use.reset();
         app.breaking_held = false;
         app.mining_session.reset();
         app.last_physics = Instant::now();
@@ -3753,6 +3814,8 @@ unsafe fn build_world_form(window: Hwnd, world: Option<StoredWorld>, new_name: S
     if let Some(app) = APP.as_mut() {
         app.dialog_open = true;
         app.input.clear();
+        app.food_use_held = false;
+        app.food_use.reset();
         app.toggle_flight_pending = false;
         if app.cursor_locked {
             app.cursor_locked = false;
@@ -3789,7 +3852,7 @@ fn optional_seed(text: &str) -> Result<u64, ()> {
 mod world_creation_tests {
     use super::{
         build_scene, food_pips, health_pips, hotbar_slot_after_scroll, inventory_slot,
-        is_initial_keydown, key_for, matching_creative_blocks, optional_seed, player_controller,
+        is_initial_keydown, key_for, matching_creative_items, optional_seed, player_controller,
         prototype_block_for_item, stored_game_mode, GameMode, InventorySlot, StoredGameMode,
     };
     use crate::inventory::{ItemId, ItemKey};
@@ -3826,12 +3889,12 @@ mod world_creation_tests {
     }
 
     #[test]
-    fn creative_catalog_search_is_case_insensitive_and_bounded_to_registered_blocks() {
-        assert_eq!(matching_creative_blocks(""), (1..=10).collect::<Vec<_>>());
-        assert_eq!(matching_creative_blocks("sNoW"), vec![6]);
-        assert_eq!(matching_creative_blocks("pan"), vec![10]);
-        assert!(matching_creative_blocks("not a block").is_empty());
-        assert_eq!(matching_creative_blocks("  fence  "), vec![9]);
+    fn creative_catalog_search_is_case_insensitive_and_bounded_to_registered_items() {
+        assert_eq!(matching_creative_items(""), (1..=11).collect::<Vec<_>>());
+        assert_eq!(matching_creative_items("sNoW"), vec![6]);
+        assert_eq!(matching_creative_items("pan"), vec![10]);
+        assert!(matching_creative_items("not a block").is_empty());
+        assert_eq!(matching_creative_items("  fence  "), vec![9]);
     }
 
     #[test]
@@ -3952,6 +4015,8 @@ unsafe fn close_world_creation_form(window: Hwnd) {
     if let Some(app) = APP.as_mut() {
         app.dialog_open = TITLE_FORM.is_some();
         app.input.clear();
+        app.food_use_held = false;
+        app.food_use.reset();
         app.last_physics = Instant::now();
     }
     SetFocus(window);
@@ -4003,7 +4068,9 @@ unsafe fn handle_inventory_command(window: Hwnd, command: usize, notification: u
             let key = ItemKey::new(ItemId(item_id));
             match app.inventory.pick_item_to_hotbar(key, &app.item_catalog) {
                 Ok(_) => {
-                    app.selected_block = crate::world::BlockId(item_id);
+                    if let Some(block) = prototype_block_for_item(key) {
+                        app.selected_block = block;
+                    }
                     if let Some(scene) = SCENE.as_mut() {
                         scene.dirty = true;
                     }
@@ -4105,6 +4172,8 @@ unsafe fn close_inventory_form(window: Hwnd) {
         }
         app.dialog_open = false;
         app.input.clear();
+        app.food_use_held = false;
+        app.food_use.reset();
         app.last_physics = Instant::now();
         if restore_cursor {
             app.cursor_locked = true;
@@ -4256,6 +4325,8 @@ unsafe fn submit_world_creation_form(window: Hwnd) {
                 destroy_world_creation_form();
                 app.dialog_open = TITLE_FORM.is_some();
                 app.input.clear();
+                app.food_use_held = false;
+                app.food_use.reset();
                 app.last_physics = Instant::now();
                 if app
                     .world_metadata
@@ -4300,6 +4371,8 @@ unsafe fn submit_world_creation_form(window: Hwnd) {
             destroy_world_creation_form();
             app.dialog_open = TITLE_FORM.is_some();
             app.input.clear();
+            app.food_use_held = false;
+            app.food_use.reset();
             app.last_physics = Instant::now();
             activate_world(window, app, created);
         }
@@ -4596,6 +4669,8 @@ unsafe fn activate_world(window: Hwnd, app: &mut AppState, saved: crate::world_s
     app.pitch = saved.player.pitch;
     app.world_metadata = Some(saved.metadata);
     app.input.clear();
+    app.food_use_held = false;
+    app.food_use.reset();
     app.pending_block_actions.clear();
     app.breaking_held = false;
     app.mining_session.reset();
@@ -4773,6 +4848,8 @@ pub fn run(logger: Option<Logger>) {
             mining_catalog: MiningCatalog::prototype(),
             mining_session: MiningSession::default(),
             breaking_held: false,
+            food_use_held: false,
+            food_use: crate::food_use::FoodUseSession::default(),
             sprint_toggled: false,
             sneak_toggled: false,
             last_jump_press: None,
@@ -5021,7 +5098,7 @@ fn build_scene(
 
 fn prototype_item_catalog() -> ItemCatalog {
     let mut catalog = ItemCatalog::default();
-    for id in 1..=10 {
+    for id in 1..=11 {
         catalog
             .register(ItemId(id), ItemDefinition::stackable(64))
             .expect("prototype item IDs are unique and valid");
