@@ -134,11 +134,9 @@ const WS_TABSTOP: u32 = 0x0001_0000;
 const ES_AUTOHSCROLL: u32 = 0x0080;
 const CBS_DROPDOWNLIST: u32 = 0x0003;
 const SS_WHITERECT: u32 = 0x0006;
-const SS_OWNERDRAW: u32 = 0x000D;
 const BS_DEFPUSHBUTTON: u32 = 0x0001;
 const BS_PUSHBUTTON: u32 = 0x0000;
 const BS_OWNERDRAW: u32 = 0x000B;
-const ODT_STATIC: u32 = 2;
 const ODT_BUTTON: u32 = 4;
 const ODS_SELECTED: u32 = 0x0001;
 const ODS_DISABLED: u32 = 0x0004;
@@ -633,17 +631,22 @@ unsafe extern "system" fn window_proc(
         }
         WM_DRAWITEM if lparam != 0 => {
             let item = &mut *(lparam as *mut DrawItemStruct);
-            match item.control_type {
-                ODT_STATIC => draw_menu_panel(item.hdc, item.item_rect),
-                ODT_BUTTON => draw_menu_button(item),
-                _ => return DefWindowProcW(window, message, wparam, lparam),
+            if item.control_type == ODT_BUTTON {
+                draw_menu_button(item);
+                1
+            } else {
+                DefWindowProcW(window, message, wparam, lparam)
             }
-            1
         }
         WM_CTLCOLORSTATIC => {
             SetTextColor(wparam as Hdc, rgb(230, 236, 238));
             SetBkMode(wparam as Hdc, TRANSPARENT);
-            GetStockObject(HOLLOW_BRUSH) as Lresult
+            let texture = menu_texture_brush(false);
+            if texture.is_null() {
+                GetStockObject(HOLLOW_BRUSH) as Lresult
+            } else {
+                texture as Lresult
+            }
         }
         WM_PAINT => {
             let mut paint = PaintStruct {
@@ -1861,7 +1864,9 @@ unsafe fn create_form_control(
         if class_name == "BUTTON" && matches!(style & 0x0f, BS_PUSHBUTTON | BS_DEFPUSHBUTTON) {
             style | BS_OWNERDRAW
         } else if class_name == "STATIC" && style == SS_WHITERECT {
-            SS_OWNERDRAW
+            // SS_WHITERECT forces the system white brush and bypasses
+            // WM_CTLCOLORSTATIC. A plain static surface uses our panel brush.
+            0
         } else {
             style
         };
@@ -4836,15 +4841,14 @@ pub fn run(logger: Option<Logger>) {
         SetTimer(window, TIMER_ID, TICK_INTERVAL_MS, null_mut());
         SetTimer(window, RENDER_TIMER_ID, 16, null_mut());
         if let Some(app) = APP.as_mut() {
-            match GpuRenderer::new(window as isize, width as u32, height as u32) {
-                Ok(mut gpu) => {
-                    let scene = SCENE.as_ref().unwrap();
-                    upload_scene_meshes(&mut gpu, scene);
-                    app.gpu = Some(gpu);
-                    app.logger.event("INFO", "render_backend", "wgpu_textured");
-                }
-                Err(error) => app.logger.event("WARN", "gpu_unavailable", error),
-            }
+            // The flip-model swap chain occludes native child controls on some
+            // Windows systems. Keep the GDI presenter active until menus are
+            // drawn in the GPU compositor, so every menu remains visible.
+            app.logger.event(
+                "INFO",
+                "render_backend",
+                "cpu_gdi_native_menu_composited_gpu_ui_pending",
+            );
         }
         ShowWindow(window, SW_SHOW);
         UpdateWindow(window);
@@ -5730,55 +5734,6 @@ unsafe fn menu_texture_brush(button: bool) -> *mut c_void {
         DeleteObject(bitmap);
         brush as usize
     }) as *mut c_void
-}
-
-unsafe fn draw_menu_panel(hdc: Hdc, rect: Rect) {
-    let texture = menu_texture_brush(false);
-    if !texture.is_null() {
-        FillRect(hdc, &rect, texture);
-    }
-    let border = rgb(103, 130, 137);
-    let accent = rgb(185, 153, 94);
-    fill_hud_rect(
-        hdc,
-        Rect {
-            left: rect.left,
-            top: rect.top,
-            right: rect.right,
-            bottom: rect.top + 3,
-        },
-        accent,
-    );
-    fill_hud_rect(
-        hdc,
-        Rect {
-            left: rect.left,
-            top: rect.top + 3,
-            right: rect.left + 2,
-            bottom: rect.bottom,
-        },
-        border,
-    );
-    fill_hud_rect(
-        hdc,
-        Rect {
-            left: rect.right - 2,
-            top: rect.top + 3,
-            right: rect.right,
-            bottom: rect.bottom,
-        },
-        border,
-    );
-    fill_hud_rect(
-        hdc,
-        Rect {
-            left: rect.left + 2,
-            top: rect.bottom - 2,
-            right: rect.right - 2,
-            bottom: rect.bottom,
-        },
-        rgb(15, 22, 27),
-    );
 }
 
 unsafe fn draw_menu_button(item: &mut DrawItemStruct) {
