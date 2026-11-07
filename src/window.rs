@@ -53,6 +53,8 @@ const WM_TIMER: u32 = 0x0113;
 const WM_KEYDOWN: u32 = 0x0100;
 const WM_KEYUP: u32 = 0x0101;
 const WM_MOUSEMOVE: u32 = 0x0200;
+const WM_MOUSEWHEEL: u32 = 0x020A;
+const MOUSE_WHEEL_DELTA: i32 = 120;
 const CS_HREDRAW: u32 = 0x0002;
 const CS_VREDRAW: u32 = 0x0001;
 const WS_OVERLAPPEDWINDOW: u32 = 0x00CF0000;
@@ -308,6 +310,7 @@ struct AppState {
     gpu: Option<GpuRenderer>,
     last_physics: Instant,
     selected_block: crate::world::BlockId,
+    hotbar_scroll_remainder: i32,
     inventory: Inventory,
     inventory_menu: InventoryMenu,
     item_catalog: ItemCatalog,
@@ -979,6 +982,41 @@ unsafe extern "system" fn window_proc(
                         "hotbar_select",
                         format!("slot={} block={name}", slot + 1),
                     );
+                }
+            }
+            0
+        }
+        WM_MOUSEWHEEL => {
+            if let Some(app) = APP.as_mut() {
+                if app.dialog_open {
+                    return 0;
+                }
+                let delta = i32::from(((wparam >> 16) as u16) as i16);
+                app.hotbar_scroll_remainder = app.hotbar_scroll_remainder.saturating_add(delta);
+                let steps = app.hotbar_scroll_remainder / MOUSE_WHEEL_DELTA;
+                app.hotbar_scroll_remainder %= MOUSE_WHEEL_DELTA;
+                if steps != 0 {
+                    let slot = hotbar_slot_after_scroll(
+                        usize::from(app.inventory.selected_hotbar()),
+                        steps,
+                    );
+                    if app.inventory.select_hotbar(slot).is_ok() {
+                        if let Some(block) = app
+                            .inventory
+                            .selected_stack()
+                            .and_then(|stack| prototype_block_for_item(stack.key))
+                        {
+                            app.selected_block = block;
+                        }
+                        if let Some(scene) = SCENE.as_mut() {
+                            scene.dirty = true;
+                        }
+                        app.logger.event(
+                            "INFO",
+                            "hotbar_select",
+                            format!("slot={} source=mouse_wheel", slot + 1),
+                        );
+                    }
                 }
             }
             0
@@ -2705,8 +2743,9 @@ fn optional_seed(text: &str) -> Result<u64, ()> {
 #[cfg(test)]
 mod world_creation_tests {
     use super::{
-        build_scene, inventory_slot, is_initial_keydown, key_for, optional_seed, player_controller,
-        prototype_block_for_item, stored_game_mode, GameMode, InventorySlot, StoredGameMode,
+        build_scene, hotbar_slot_after_scroll, inventory_slot, is_initial_keydown, key_for,
+        optional_seed, player_controller, prototype_block_for_item, stored_game_mode, GameMode,
+        InventorySlot, StoredGameMode,
     };
     use crate::inventory::{ItemId, ItemKey};
     use crate::render::InputKey;
@@ -2731,6 +2770,14 @@ mod world_creation_tests {
             None
         );
         assert_eq!(prototype_block_for_item(ItemKey::new(ItemId(4))), None);
+    }
+
+    #[test]
+    fn hotbar_wheel_scroll_wraps_and_uses_each_notch() {
+        assert_eq!(hotbar_slot_after_scroll(0, 1), 8);
+        assert_eq!(hotbar_slot_after_scroll(8, -1), 0);
+        assert_eq!(hotbar_slot_after_scroll(3, 2), 1);
+        assert_eq!(hotbar_slot_after_scroll(3, -2), 5);
     }
 
     #[test]
@@ -3528,6 +3575,7 @@ pub fn run(logger: Option<Logger>) {
             last_physics: Instant::now(),
             gpu: None,
             selected_block: initial_player.selected_block,
+            hotbar_scroll_remainder: 0,
             inventory: initial_player.inventory,
             inventory_menu: InventoryMenu::default(),
             item_catalog: prototype_item_catalog(),
@@ -3790,6 +3838,10 @@ fn prototype_item_catalog() -> ItemCatalog {
 
 fn prototype_block_for_item(key: ItemKey) -> Option<crate::world::BlockId> {
     (key.variant == 0 && (1..=3).contains(&key.id.0)).then_some(crate::world::BlockId(key.id.0))
+}
+
+fn hotbar_slot_after_scroll(current: usize, positive_scroll_steps: i32) -> usize {
+    (current as i64 - i64::from(positive_scroll_steps)).rem_euclid(9) as usize
 }
 
 fn upload_scene_meshes(gpu: &mut GpuRenderer, scene: &Scene) {
