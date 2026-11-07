@@ -1,6 +1,7 @@
 //! Independently authored deterministic terrain generation.
 
 use crate::world::{BlockId, Chunk, ChunkPos, World, CHUNK_SIZE, MAX_SERIALIZED_CHUNKS};
+use crate::{blocks::BlockRegistry, interaction::refresh_fence_connections_for_chunk};
 
 pub const AIR: BlockId = BlockId(0);
 pub const SOIL: BlockId = BlockId(1);
@@ -123,6 +124,7 @@ impl TerrainGenerator {
         }
         for position in &missing {
             world.insert_generated_chunk(*position, self.generate_chunk(*position));
+            refresh_fence_connections_for_chunk(world, *position, &BlockRegistry::new());
         }
         Ok(missing)
     }
@@ -185,6 +187,31 @@ mod tests {
             .ensure_region(&mut world, ChunkPos { x: -3, y: 0, z: 4 }, 1)
             .unwrap()
             .is_empty());
+    }
+
+    #[test]
+    fn loading_a_neighbor_chunk_refreshes_fences_on_the_shared_boundary() {
+        let generator = TerrainGenerator::default();
+        let mut world = World::new();
+        let west_chunk = ChunkPos { x: 0, y: 0, z: 0 };
+        let fence = world.get_or_create_chunk(west_chunk);
+        fence.set(15, 1, 1, BlockId(9)).unwrap();
+        assert_eq!(
+            fence.get_state(15, 1, 1).unwrap().connections,
+            0,
+            "an unloaded neighbor must not be assumed to connect"
+        );
+
+        generator
+            .ensure_region(&mut world, ChunkPos { x: 1, y: 0, z: 0 }, 0)
+            .unwrap();
+
+        assert!(world.block_at([16, 1, 1]).is_some());
+        assert_eq!(
+            world.block_state_at([15, 1, 1]).unwrap().connections,
+            0b0010,
+            "the newly loaded full cube should add the fence's east rail"
+        );
     }
 
     #[test]

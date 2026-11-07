@@ -308,8 +308,8 @@ pub fn refresh_fence_connections_around(
     registry: &BlockRegistry,
 ) {
     const DIRECTIONS: [[i32; 3]; 4] = [[0, 0, -1], [1, 0, 0], [0, 0, 1], [-1, 0, 0]];
-    let mut candidates = Vec::with_capacity(5);
-    candidates.push(changed);
+    let mut candidates = [changed; 5];
+    let mut candidate_count = 1;
     for direction in DIRECTIONS {
         let Some(position) = (0..3).try_fold(changed, |mut position, axis| {
             position[axis] = position[axis].checked_add(direction[axis])?;
@@ -317,10 +317,11 @@ pub fn refresh_fence_connections_around(
         }) else {
             continue;
         };
-        candidates.push(position);
+        candidates[candidate_count] = position;
+        candidate_count += 1;
     }
 
-    for position in candidates {
+    for position in candidates.into_iter().take(candidate_count) {
         if world.block_at(position) != Some(BlockId(9)) {
             continue;
         }
@@ -347,6 +348,52 @@ pub fn refresh_fence_connections_around(
             .unwrap_or_else(|| default_block_state(BlockId(9)));
         state.connections = connections;
         let _ = world.set_block_state(position, state);
+    }
+}
+
+/// Refresh fences along the horizontal boundary of a newly available chunk.
+/// Rechecking only the perimeter keeps streaming work bounded by chunk area.
+pub fn refresh_fence_connections_for_chunk(
+    world: &mut World,
+    chunk: crate::world::ChunkPos,
+    registry: &BlockRegistry,
+) {
+    use crate::world::CHUNK_SIZE;
+
+    let Some(base_x) = chunk.x.checked_mul(CHUNK_SIZE as i32) else {
+        return;
+    };
+    let Some(base_y) = chunk.y.checked_mul(CHUNK_SIZE as i32) else {
+        return;
+    };
+    let Some(base_z) = chunk.z.checked_mul(CHUNK_SIZE as i32) else {
+        return;
+    };
+    let Some(max_x) = base_x.checked_add(CHUNK_SIZE as i32 - 1) else {
+        return;
+    };
+    let Some(max_z) = base_z.checked_add(CHUNK_SIZE as i32 - 1) else {
+        return;
+    };
+
+    for local_y in 0..CHUNK_SIZE as i32 {
+        let Some(y) = base_y.checked_add(local_y) else {
+            continue;
+        };
+        for offset in 0..CHUNK_SIZE as i32 {
+            let Some(z) = base_z.checked_add(offset) else {
+                continue;
+            };
+            refresh_fence_connections_around(world, [base_x, y, z], registry);
+            refresh_fence_connections_around(world, [max_x, y, z], registry);
+        }
+        for offset in 0..CHUNK_SIZE as i32 {
+            let Some(x) = base_x.checked_add(offset) else {
+                continue;
+            };
+            refresh_fence_connections_around(world, [x, y, base_z], registry);
+            refresh_fence_connections_around(world, [x, y, max_z], registry);
+        }
     }
 }
 
