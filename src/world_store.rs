@@ -23,7 +23,12 @@ const MAX_NAME_BYTES: usize = 128;
 const MAX_BACKUPS: usize = 5;
 const MAX_SAVE_BYTES: usize = 4096
     + MAX_DROPPED_ITEMS * 72
-    + MAX_SERIALIZED_CHUNKS * (12 + CHUNK_VOLUME * std::mem::size_of::<u16>());
+    + MAX_SERIALIZED_CHUNKS
+        * (12
+            + 1
+            + CHUNK_VOLUME * std::mem::size_of::<u16>()
+            + 2
+            + CHUNK_VOLUME * (2 * std::mem::size_of::<u16>()));
 static NEXT_FILE_ID: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1727,6 +1732,44 @@ mod tests {
             loaded.world.get_chunk(ChunkPos { x: 0, y: 0, z: 0 }),
             Some(&generator.generate_chunk(ChunkPos { x: 0, y: 0, z: 0 }))
         );
+    }
+
+    #[test]
+    fn block_state_shapes_survive_world_store_save_and_reload() {
+        let root = TestRoot::new();
+        let store = WorldStore::new(&root.0);
+        let position = [2, 1, 1];
+        let state = crate::blocks::BlockState {
+            kind: crate::blocks::BlockKind::Slab,
+            upper: true,
+            layers: 1,
+        };
+        let mut world = World::new();
+        world.get_or_create_chunk(ChunkPos::default());
+        world.set_block(position, BlockId(4));
+        world.set_block_state(position, state);
+        let created = store
+            .create(
+                "Block State World",
+                12,
+                StoredGameMode::Creative,
+                world,
+                PlayerSnapshot::default(),
+            )
+            .unwrap();
+
+        let loaded = store.load(&created.metadata.id).unwrap();
+        assert_eq!(loaded.world.block_at(position), Some(BlockId(4)));
+        assert_eq!(loaded.world.block_state_at(position), Some(state));
+        let hit = crate::interaction::raycast_blocks(
+            &loaded.world,
+            &crate::blocks::BlockRegistry::new(),
+            [0.5, 1.75, 1.5],
+            [1.0, 0.0, 0.0],
+            3.0,
+        )
+        .unwrap();
+        assert_eq!(hit.position, crate::interaction::BlockPos(position));
     }
 
     #[test]

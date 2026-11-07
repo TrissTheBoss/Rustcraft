@@ -596,23 +596,18 @@ unsafe extern "system" fn window_proc(
                         app.jump_was_pressed = app.input.is_pressed(InputKey::Up);
                         app.player
                             .tick_with_collision_shapes(input, app.yaw as f64, |x, y, z| {
-                                let position = ChunkPos {
-                                    x: x.div_euclid(CHUNK_SIZE as i32),
-                                    y: y.div_euclid(CHUNK_SIZE as i32),
-                                    z: z.div_euclid(CHUNK_SIZE as i32),
-                                };
-                                let lx = x.rem_euclid(CHUNK_SIZE as i32) as usize;
-                                let ly = y.rem_euclid(CHUNK_SIZE as i32) as usize;
-                                let lz = z.rem_euclid(CHUNK_SIZE as i32) as usize;
-                                scene
-                                    .world
-                                    .get_chunk(position)
-                                    .map(|chunk| {
+                                let block_position = [x, y, z];
+                                match (
+                                    scene.world.block_at(block_position),
+                                    scene.world.block_state_at(block_position),
+                                ) {
+                                    (Some(block), Some(state)) => {
                                         BlockRegistry::new()
-                                            .definition(chunk.get(lx, ly, lz).unwrap())
+                                            .definition_with_state(block, state)
                                             .collision
-                                    })
-                                    .unwrap_or(crate::blocks::CollisionShape::EMPTY)
+                                    }
+                                    _ => crate::blocks::CollisionShape::EMPTY,
+                                }
                             });
                         let center = (
                             (app.player.transform.x / CHUNK_SIZE as f64).floor() as i32,

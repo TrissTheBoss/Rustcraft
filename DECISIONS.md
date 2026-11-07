@@ -4,6 +4,10 @@
 
 Backup filenames contain a Unix timestamp and a process-wide numeric sequence. Retention parses and compares both numbers instead of sorting filenames lexicographically, which can misorder sequences once the counter reaches two or more digits and delete a fresh recovery point. A preserved user-selected backup remains pinned while the oldest unpinned snapshot is pruned.
 
+## 2026-11-07 - Persist sparse block states in world payload v3
+
+Chunks store only block-state overrides from their prototype defaults. Upper/lower slabs and snow-layer counts are validated, versioned, serialized, and applied to collision and ray selection; replacement resets to the new block default. Payload v1/v2 remains readable and derives known prototype defaults. The outer save envelope remains v6 because the inner world payload is separately versioned. Future block catalogs, state-dependent visual/selection data, and complete reference behavior remain separate work.
+
 ## 2026-11-07 - Use block-local collision geometry for movement and targeting
 
 The block registry supplies prototype collision boxes and the runtime player collider and raycaster query those boxes instead of assuming each non-air block occupies a full cube. Ray traversal checks nearby owner cells so tall shapes can be selected above their base voxel. Collision and selection geometry are still coupled, block states are not stored in world data, and rendering/content definitions are incomplete; these prototypes are not Java Edition conformance evidence.

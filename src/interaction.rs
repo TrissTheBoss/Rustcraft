@@ -104,7 +104,14 @@ pub fn raycast_blocks(
                     let Some(block) = world.block_at(position) else {
                         continue;
                     };
-                    for local_shape in registry.definition(block).collision.boxes() {
+                    let Some(state) = world.block_state_at(position) else {
+                        continue;
+                    };
+                    for local_shape in registry
+                        .definition_with_state(block, state)
+                        .collision
+                        .boxes()
+                    {
                         let Some((distance, face_normal)) =
                             ray_aabb(origin, direction, local_shape.translated(position))
                                 .filter(|(distance, _)| *distance <= max_distance)
@@ -315,6 +322,19 @@ mod tests {
         assert_eq!(slab_hit.position, BlockPos([2, 0, 0]));
         assert_eq!(slab_hit.face_normal, [-1, 0, 0]);
         assert!((slab_hit.distance - 1.5).abs() < 1.0e-9);
+
+        let upper_slab = crate::blocks::BlockState {
+            kind: crate::blocks::BlockKind::Slab,
+            upper: true,
+            layers: 1,
+        };
+        world.set_block_state([2, 0, 0], upper_slab);
+        assert!(
+            raycast_blocks(&world, &registry, [0.5, 0.25, 0.5], [1.0, 0.0, 0.0], 3.0).is_none()
+        );
+        let upper_hit =
+            raycast_blocks(&world, &registry, [0.5, 0.75, 0.5], [1.0, 0.0, 0.0], 3.0).unwrap();
+        assert_eq!(upper_hit.position, BlockPos([2, 0, 0]));
 
         let fence_hit =
             raycast_blocks(&world, &registry, [4.0, 1.25, 0.5], [1.0, 0.0, 0.0], 2.0).unwrap();

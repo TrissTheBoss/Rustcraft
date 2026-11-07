@@ -112,6 +112,62 @@ impl BlockState {
         }
     }
 
+    pub const fn is_valid(self) -> bool {
+        match self.kind {
+            BlockKind::Snow => !self.upper && self.layers >= 1 && self.layers <= 8,
+            BlockKind::Slab => self.layers == 1,
+            _ => !self.upper && self.layers == 1,
+        }
+    }
+
+    /// Compact, stable payload for the current block-state schema. Zero and
+    /// reserved high bits are rejected so corrupt values cannot become shapes.
+    pub const fn encode(self) -> Option<u16> {
+        if !self.is_valid() {
+            return None;
+        }
+        let kind = match self.kind {
+            BlockKind::Air => 1,
+            BlockKind::FullBlock => 2,
+            BlockKind::Slab => 3,
+            BlockKind::Carpet => 4,
+            BlockKind::Snow => 5,
+            BlockKind::Farmland => 6,
+            BlockKind::Path => 7,
+            BlockKind::Fence => 8,
+            BlockKind::Pane => 9,
+        };
+        Some(kind | ((self.upper as u16) << 4) | (((self.layers - 1) as u16) << 5))
+    }
+
+    pub const fn decode(code: u16) -> Option<Self> {
+        if code == 0 || code & !0x00ff != 0 {
+            return None;
+        }
+        let kind = match code & 0x000f {
+            1 => BlockKind::Air,
+            2 => BlockKind::FullBlock,
+            3 => BlockKind::Slab,
+            4 => BlockKind::Carpet,
+            5 => BlockKind::Snow,
+            6 => BlockKind::Farmland,
+            7 => BlockKind::Path,
+            8 => BlockKind::Fence,
+            9 => BlockKind::Pane,
+            _ => return None,
+        };
+        let state = Self {
+            kind,
+            upper: code & 0x0010 != 0,
+            layers: (((code >> 5) & 0x7) + 1) as u8,
+        };
+        if state.is_valid() {
+            Some(state)
+        } else {
+            None
+        }
+    }
+
     pub const fn shape(self) -> CollisionShape {
         match self.kind {
             BlockKind::Air => CollisionShape::EMPTY,
@@ -160,6 +216,53 @@ impl BlockState {
                 max: [9.0 / 16.0, 1.0, 9.0 / 16.0],
             }]),
         }
+    }
+}
+
+pub const fn default_block_state(id: BlockId) -> BlockState {
+    match id.0 {
+        0 => BlockState {
+            kind: BlockKind::Air,
+            upper: false,
+            layers: 1,
+        },
+        1..=3 => BlockState::full_block(),
+        4 => BlockState {
+            kind: BlockKind::Slab,
+            upper: false,
+            layers: 1,
+        },
+        5 => BlockState {
+            kind: BlockKind::Carpet,
+            upper: false,
+            layers: 1,
+        },
+        6 => BlockState {
+            kind: BlockKind::Snow,
+            upper: false,
+            layers: 1,
+        },
+        7 => BlockState {
+            kind: BlockKind::Farmland,
+            upper: false,
+            layers: 1,
+        },
+        8 => BlockState {
+            kind: BlockKind::Path,
+            upper: false,
+            layers: 1,
+        },
+        9 => BlockState {
+            kind: BlockKind::Fence,
+            upper: false,
+            layers: 1,
+        },
+        10 => BlockState {
+            kind: BlockKind::Pane,
+            upper: false,
+            layers: 1,
+        },
+        _ => BlockState::full_block(),
     }
 }
 
@@ -307,6 +410,14 @@ impl BlockRegistry {
                 opaque: true,
             },
         }
+    }
+
+    pub fn definition_with_state(&self, id: BlockId, state: BlockState) -> BlockDefinition {
+        let mut definition = self.definition(id);
+        if state.is_valid() && state.kind == default_block_state(id).kind {
+            definition.collision = state.shape();
+        }
+        definition
     }
 
     pub fn is_solid(&self, id: BlockId) -> bool {
