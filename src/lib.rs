@@ -9,6 +9,7 @@ pub mod grid;
 pub mod interaction;
 pub mod inventory;
 pub mod logger;
+pub mod mining;
 pub mod movement;
 pub mod networking;
 pub mod render;

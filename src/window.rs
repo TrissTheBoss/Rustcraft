@@ -14,11 +14,12 @@ use crate::drops::{BlockLootTable, ItemDrops, ITEM_PICKUP_DELAY_TICKS};
 use crate::gpu::GpuRenderer;
 use crate::grid::PLAYER_EYE_OFFSET;
 use crate::interaction::{
-    break_block, break_block_with_drop, place_full_block, raycast_blocks,
+    break_block, break_block_with_drop, place_full_block, raycast_blocks, BlockRayHit,
     PROTOTYPE_INTERACTION_REACH,
 };
 use crate::inventory::{Inventory, ItemCatalog, ItemDefinition, ItemId};
 use crate::logger::Logger;
+use crate::mining::{MiningCatalog, MiningEvent, MiningSession, MiningTool};
 use crate::movement::{GameMode, MovementInput, PlayerController};
 use crate::render::{
     greedy_mesh_chunk, load_png, Camera, CpuRenderer, DirectionalLight, InputKey, InputState,
@@ -96,7 +97,9 @@ const MB_DEFBUTTON2: u32 = 0x0100;
 const TICK_INTERVAL_MS: u32 = 50;
 const VK_ESCAPE: u32 = 0x1B;
 const WM_LBUTTONDOWN: u32 = 0x0201;
+const WM_LBUTTONUP: u32 = 0x0202;
 const WM_RBUTTONDOWN: u32 = 0x0204;
+const WM_KILLFOCUS: u32 = 0x0008;
 // The CPU renderer is supersampled 2x in each axis below. Keep the presented
 // target at a 16:9 960x540 cap so the anti-aliased path remains responsive.
 const MAX_RENDER_WIDTH: u32 = 960;
@@ -277,6 +280,9 @@ struct AppState {
     item_catalog: ItemCatalog,
     loot_table: BlockLootTable,
     drops: ItemDrops,
+    mining_catalog: MiningCatalog,
+    mining_session: MiningSession,
+    breaking_held: bool,
     last_jump_press: Option<Instant>,
     jump_was_pressed: bool,
     toggle_flight_pending: bool,
@@ -529,6 +535,31 @@ unsafe extern "system" fn window_proc(
                                 handle_block_action(app, scene, breaking);
                             }
                         }
+                        let mining_target =
+                            if app.player.mode == GameMode::Survival && app.breaking_held {
+                                SCENE
+                                    .as_ref()
+                                    .and_then(|scene| targeted_block_hit(app, &scene.world))
+                            } else {
+                                None
+                            };
+                        let required_ticks = mining_target
+                            .map(|hit| {
+                                app.mining_catalog
+                                    .ticks_to_break(hit.block, MiningTool::HAND)
+                                    .unwrap_or(u16::MAX)
+                            })
+                            .unwrap_or(0);
+                        let mining_event = app.mining_session.tick(
+                            app.player.mode == GameMode::Survival && app.breaking_held,
+                            mining_target,
+                            required_ticks,
+                        );
+                        if matches!(mining_event, MiningEvent::Completed(_)) {
+                            if let Some(scene) = SCENE.as_mut() {
+                                handle_block_action(app, scene, true);
+                            }
+                        }
                         if !app.drops.is_empty() {
                             if let Some(scene) = SCENE.as_mut() {
                                 let player_position = [
@@ -612,7 +643,7 @@ unsafe extern "system" fn window_proc(
                             .map(|metadata| metadata.name.as_str())
                             .unwrap_or("Unsaved Prototype");
                         let title = wide(&format!(
-                            "Voxel Engine 0.8.8 | {world_name} | Slot {} {} | block={:.2},{:.2},{:.2} speed={:.2} b/s",
+                            "Voxel Engine 0.8.8 | {world_name} | Slot {} {} | block={:.2},{:.2},{:.2} speed={:.2} b/s | mine={:.1}%",
                             app.selected_block.0,
                             BlockRegistry::new().definition(app.selected_block).name,
                             app.player.transform.x,
@@ -620,7 +651,8 @@ unsafe extern "system" fn window_proc(
                             app.player.transform.z,
                             (app.player.velocity[0].powi(2) + app.player.velocity[2].powi(2))
                                 .sqrt()
-                                * 20.0
+                                * 20.0,
+                            app.mining_session.progress_permille() as f32 / 10.0
                         ));
                         SetWindowTextW(window, title.as_ptr());
                     }
@@ -707,6 +739,8 @@ unsafe extern "system" fn window_proc(
             if let Some(app) = APP.as_mut() {
                 if wparam as u32 == VK_ESCAPE && message == WM_KEYDOWN {
                     app.cursor_locked = false;
+                    app.breaking_held = false;
+                    app.mining_session.reset();
                     ClipCursor(null());
                     ShowCursor(1);
                     app.logger.event("INFO", "cursor_released", "key=escape");
@@ -762,7 +796,11 @@ unsafe extern "system" fn window_proc(
                     return 0;
                 }
                 if app.cursor_locked {
-                    queue_block_action(app, true);
+                    if app.player.mode == GameMode::Survival {
+                        app.breaking_held = true;
+                    } else {
+                        queue_block_action(app, true);
+                    }
                     return 0;
                 }
                 app.cursor_locked = true;
@@ -770,6 +808,20 @@ unsafe extern "system" fn window_proc(
                 lock_cursor(window);
                 app.logger
                     .event("INFO", "cursor_captured", "source=mouse_click");
+            }
+            0
+        }
+        WM_LBUTTONUP => {
+            if let Some(app) = APP.as_mut() {
+                app.breaking_held = false;
+                app.mining_session.reset();
+            }
+            0
+        }
+        WM_KILLFOCUS => {
+            if let Some(app) = APP.as_mut() {
+                app.breaking_held = false;
+                app.mining_session.reset();
             }
             0
         }
@@ -1819,6 +1871,8 @@ unsafe fn activate_world(window: Hwnd, app: &mut AppState, saved: crate::world_s
     app.world_metadata = Some(saved.metadata);
     app.input.clear();
     app.pending_block_actions.clear();
+    app.breaking_held = false;
+    app.mining_session.reset();
     app.jump_was_pressed = false;
     app.last_jump_press = None;
     app.last_physics = Instant::now();
@@ -1900,6 +1954,9 @@ pub fn run(logger: Option<Logger>) {
             item_catalog: prototype_item_catalog(),
             loot_table: BlockLootTable::prototype(),
             drops: initial_player.drops.clone(),
+            mining_catalog: MiningCatalog::prototype(),
+            mining_session: MiningSession::default(),
+            breaking_held: false,
             last_jump_press: None,
             jump_was_pressed: false,
             toggle_flight_pending: false,
@@ -2184,6 +2241,23 @@ fn queue_block_action(app: &mut AppState, breaking: bool) {
     app.pending_block_actions.push_back(breaking);
 }
 
+fn targeted_block_hit(app: &AppState, world: &crate::world::World) -> Option<BlockRayHit> {
+    let player = app.player.transform;
+    let origin = [player.x, player.y + PLAYER_EYE_OFFSET, player.z];
+    let direction = [
+        app.pitch.cos() as f64 * app.yaw.cos() as f64,
+        app.pitch.sin() as f64,
+        app.pitch.cos() as f64 * app.yaw.sin() as f64,
+    ];
+    raycast_blocks(
+        world,
+        &BlockRegistry::new(),
+        origin,
+        direction,
+        PROTOTYPE_INTERACTION_REACH,
+    )
+}
+
 fn handle_block_action(app: &mut AppState, scene: &mut Scene, breaking: bool) {
     if !app.player.mode.can_edit_blocks() {
         app.logger.event(
@@ -2193,30 +2267,16 @@ fn handle_block_action(app: &mut AppState, scene: &mut Scene, breaking: bool) {
         );
         return;
     }
-    let player = app.player.transform;
-    let origin = [player.x, player.y + PLAYER_EYE_OFFSET, player.z];
-    let direction = [
-        app.pitch.cos() * app.yaw.cos(),
-        app.pitch.sin(),
-        app.pitch.cos() * app.yaw.sin(),
-    ];
-    let Some(hit) = raycast_blocks(
-        &scene.world,
-        &BlockRegistry::new(),
-        origin,
-        [
-            direction[0] as f64,
-            direction[1] as f64,
-            direction[2] as f64,
-        ],
-        PROTOTYPE_INTERACTION_REACH,
-    ) else {
+    let Some(hit) = targeted_block_hit(app, &scene.world) else {
         app.logger
             .event("TRACE", "block_action_miss", "no target in reach");
         return;
     };
     let position = hit.position.0;
-    let changed = if breaking && app.player.mode == GameMode::Survival {
+    let harvestable = app.mining_catalog.can_harvest(hit.block, MiningTool::HAND);
+    let changed = if breaking && app.player.mode == GameMode::Survival && !harvestable {
+        break_block(&mut scene.world, hit).is_some()
+    } else if breaking && app.player.mode == GameMode::Survival {
         let drop_position = [
             position[0] as f64 + 0.5,
             position[1] as f64 + 0.5,
