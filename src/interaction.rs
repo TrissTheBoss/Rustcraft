@@ -9,6 +9,7 @@ use crate::blocks::{Aabb, BlockRegistry};
 use crate::drops::{BlockLootTable, DropError, ItemDrops};
 use crate::inventory::ItemCatalog;
 use crate::world::{BlockId, World};
+use std::collections::HashSet;
 
 pub const PROTOTYPE_INTERACTION_REACH: f64 = 5.0;
 const MAX_BLOCK_RAY_DISTANCE: f64 = 4096.0;
@@ -62,17 +63,6 @@ pub fn raycast_blocks(
         cell[axis] = floored as i32;
     }
 
-    if let Some(block) = world.block_at(cell) {
-        if registry.is_solid(block) {
-            return Some(BlockRayHit {
-                position: BlockPos(cell),
-                face_normal: [0; 3],
-                block,
-                distance: 0.0,
-            });
-        }
-    }
-
     let mut step = [0i32; 3];
     let mut t_delta = [f64::INFINITY; 3];
     let mut t_max = [f64::INFINITY; 3];
@@ -88,12 +78,55 @@ pub fn raycast_blocks(
         }
     }
 
-    // A unit ray crosses at most three voxel boundaries per world unit. The
-    // saturating cap also avoids overflow when callers request extreme ranges.
+    // Shapes such as fences can extend beyond their owning cell. Inspect the
+    // one-cell neighborhood while traversing and stop once no nearer cell can
+    // contribute a hit.
     let max_steps = (max_distance.ceil() as usize)
         .saturating_mul(3)
         .saturating_add(3);
+    let mut examined = HashSet::new();
+    let mut nearest: Option<BlockRayHit> = None;
     for _ in 0..max_steps {
+        for dx in -1..=1 {
+            for dy in -1..=1 {
+                for dz in -1..=1 {
+                    let Some(position) = cell[0]
+                        .checked_add(dx)
+                        .zip(cell[1].checked_add(dy))
+                        .zip(cell[2].checked_add(dz))
+                        .map(|((x, y), z)| [x, y, z])
+                    else {
+                        continue;
+                    };
+                    if !examined.insert(position) {
+                        continue;
+                    }
+                    let Some(block) = world.block_at(position) else {
+                        continue;
+                    };
+                    for local_shape in registry.definition(block).collision.boxes() {
+                        let Some((distance, face_normal)) =
+                            ray_aabb(origin, direction, local_shape.translated(position))
+                                .filter(|(distance, _)| *distance <= max_distance)
+                        else {
+                            continue;
+                        };
+                        if nearest.is_none_or(|hit| distance < hit.distance) {
+                            nearest = Some(BlockRayHit {
+                                position: BlockPos(position),
+                                face_normal,
+                                block,
+                                distance,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        let next_boundary = t_max[0].min(t_max[1]).min(t_max[2]);
+        if nearest.is_some_and(|hit| hit.distance <= next_boundary) {
+            return nearest;
+        }
         // Stable X, then Y, then Z tie breaking makes corner hits reproducible.
         let axis = if t_max[0] <= t_max[1] && t_max[0] <= t_max[2] {
             0
@@ -104,24 +137,49 @@ pub fn raycast_blocks(
         };
         let distance = t_max[axis];
         if !distance.is_finite() || distance > max_distance {
-            return None;
+            return nearest;
         }
         cell[axis] = cell[axis].checked_add(step[axis])?;
         t_max[axis] += t_delta[axis];
-        if let Some(block) = world.block_at(cell) {
-            if registry.is_solid(block) {
-                let mut face_normal = [0; 3];
-                face_normal[axis] = -step[axis];
-                return Some(BlockRayHit {
-                    position: BlockPos(cell),
-                    face_normal,
-                    block,
-                    distance,
-                });
+    }
+    nearest
+}
+
+fn ray_aabb(origin: [f64; 3], direction: [f64; 3], bounds: Aabb) -> Option<(f64, [i32; 3])> {
+    let mut entry = f64::NEG_INFINITY;
+    let mut exit = f64::INFINITY;
+    let mut normal = [0; 3];
+    for axis in 0..3 {
+        if direction[axis].abs() <= f64::EPSILON {
+            if origin[axis] < bounds.min[axis] || origin[axis] > bounds.max[axis] {
+                return None;
             }
+            continue;
+        }
+        let mut near = (bounds.min[axis] - origin[axis]) / direction[axis];
+        let mut far = (bounds.max[axis] - origin[axis]) / direction[axis];
+        let near_normal = if direction[axis] > 0.0 { -1 } else { 1 };
+        if near > far {
+            std::mem::swap(&mut near, &mut far);
+        }
+        if near > entry {
+            entry = near;
+            normal = [0; 3];
+            normal[axis] = near_normal;
+        }
+        exit = exit.min(far);
+        if entry > exit {
+            return None;
         }
     }
-    None
+    if exit < 0.0 {
+        return None;
+    }
+    if entry < 0.0 {
+        Some((0.0, [0; 3]))
+    } else {
+        Some((entry, normal))
+    }
 }
 
 pub fn break_block(world: &mut World, hit: BlockRayHit) -> Option<BlockId> {
@@ -240,6 +298,28 @@ mod tests {
         assert_eq!(hit.face_normal, [-1, 0, 0]);
         assert_eq!(hit.block, BlockId(3));
         assert!((hit.distance - 2.5).abs() < 1.0e-9);
+    }
+
+    #[test]
+    fn raycast_uses_partial_shapes_and_finds_tall_neighbor_shapes() {
+        let mut world = world_with_chunks(&[ChunkPos { x: 0, y: 0, z: 0 }]);
+        world.set_block([2, 0, 0], BlockId(4)); // bottom slab
+        world.set_block([5, 0, 0], BlockId(9)); // fence extends into y=1
+        let registry = BlockRegistry::new();
+
+        assert!(
+            raycast_blocks(&world, &registry, [0.5, 0.75, 0.5], [1.0, 0.0, 0.0], 3.0).is_none()
+        );
+        let slab_hit =
+            raycast_blocks(&world, &registry, [0.5, 0.25, 0.5], [1.0, 0.0, 0.0], 3.0).unwrap();
+        assert_eq!(slab_hit.position, BlockPos([2, 0, 0]));
+        assert_eq!(slab_hit.face_normal, [-1, 0, 0]);
+        assert!((slab_hit.distance - 1.5).abs() < 1.0e-9);
+
+        let fence_hit =
+            raycast_blocks(&world, &registry, [4.0, 1.25, 0.5], [1.0, 0.0, 0.0], 2.0).unwrap();
+        assert_eq!(fence_hit.position, BlockPos([5, 0, 0]));
+        assert_eq!(fence_hit.face_normal, [-1, 0, 0]);
     }
 
     #[test]

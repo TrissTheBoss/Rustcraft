@@ -3,6 +3,7 @@
 //! Values are expressed in blocks per game tick (20 ticks per second) and are
 //! intentionally centralized so later conformance measurements can adjust them.
 
+use crate::blocks::{Aabb, CollisionShape};
 use crate::entity::Transform;
 use crate::grid::{PLAYER_HALF_HEIGHT, PLAYER_HALF_WIDTH};
 
@@ -76,6 +77,23 @@ impl PlayerController {
         yaw_radians: f64,
         is_solid: impl Fn(i32, i32, i32) -> bool,
     ) {
+        self.tick_with_collision_shapes(input, yaw_radians, |x, y, z| {
+            if is_solid(x, y, z) {
+                CollisionShape::FULL_BLOCK
+            } else {
+                CollisionShape::EMPTY
+            }
+        });
+    }
+
+    /// Advance one tick against block-local collision shapes. Empty shapes
+    /// represent non-colliding cells; multiple boxes are tested independently.
+    pub fn tick_with_collision_shapes(
+        &mut self,
+        input: MovementInput,
+        yaw_radians: f64,
+        collision_shape: impl Fn(i32, i32, i32) -> CollisionShape,
+    ) {
         self.previous_transform = self.transform;
         if input.toggle_flight && self.mode == GameMode::Creative {
             self.flying = !self.flying;
@@ -146,12 +164,12 @@ impl PlayerController {
                 self.velocity[2] *= scale;
             }
         }
-        move_axis(self, 1, &is_solid);
+        move_axis(self, 1, &collision_shape);
         // Resolve vertical motion first. This lets a jump raise the player's
         // AABB above a one-block obstacle before horizontal collision checks,
         // instead of treating the obstacle as an impenetrable wall.
-        move_axis(self, 0, &is_solid);
-        move_axis(self, 2, &is_solid);
+        move_axis(self, 0, &collision_shape);
+        move_axis(self, 2, &collision_shape);
         if self.transform.y < self.half_extents[1] {
             self.transform.y = self.half_extents[1];
             self.velocity[1] = 0.0;
@@ -163,7 +181,7 @@ impl PlayerController {
 fn move_axis(
     player: &mut PlayerController,
     axis: usize,
-    is_solid: &impl Fn(i32, i32, i32) -> bool,
+    collision_shape: &impl Fn(i32, i32, i32) -> CollisionShape,
 ) {
     let mut candidate = player.transform;
     // Velocity is stored in blocks per simulation tick, so do not divide it
@@ -174,7 +192,7 @@ fn move_axis(
         1 => candidate.y += delta,
         _ => candidate.z += delta,
     }
-    if !collides(candidate, player.half_extents, &is_solid) {
+    if !collides(candidate, player.half_extents, collision_shape) {
         player.transform = candidate;
         return;
     }
@@ -184,17 +202,51 @@ fn move_axis(
     }
 }
 
-fn collides(center: Transform, half: [f64; 3], is_solid: &impl Fn(i32, i32, i32) -> bool) -> bool {
+fn collides(
+    center: Transform,
+    half: [f64; 3],
+    collision_shape: &impl Fn(i32, i32, i32) -> CollisionShape,
+) -> bool {
     let epsilon = 1.0e-9;
     let ranges = [
         (center.x - half[0] + epsilon).floor() as i32..(center.x + half[0] - epsilon).ceil() as i32,
         (center.y - half[1] + epsilon).floor() as i32..(center.y + half[1] - epsilon).ceil() as i32,
         (center.z - half[2] + epsilon).floor() as i32..(center.z + half[2] - epsilon).ceil() as i32,
     ];
+    let player_bounds = Aabb {
+        min: [
+            center.x - half[0] + epsilon,
+            center.y - half[1] + epsilon,
+            center.z - half[2] + epsilon,
+        ],
+        max: [
+            center.x + half[0] - epsilon,
+            center.y + half[1] - epsilon,
+            center.z + half[2] - epsilon,
+        ],
+    };
     ranges[0].clone().any(|x| {
-        ranges[1]
-            .clone()
-            .any(|y| ranges[2].clone().any(|z| is_solid(x, y, z)))
+        ranges[1].clone().any(|y| {
+            ranges[2].clone().any(|z| {
+                (-1..=1).any(|dx| {
+                    (-1..=1).any(|dy| {
+                        (-1..=1).any(|dz| {
+                            let owner = [
+                                x.saturating_add(dx),
+                                y.saturating_add(dy),
+                                z.saturating_add(dz),
+                            ];
+                            collision_shape(owner[0], owner[1], owner[2])
+                                .boxes()
+                                .iter()
+                                .copied()
+                                .map(|bounds| bounds.translated(owner))
+                                .any(|bounds| bounds.intersects(player_bounds))
+                        })
+                    })
+                })
+            })
+        })
     })
 }
 
@@ -238,6 +290,68 @@ mod tests {
             );
         }
         assert!(sprinting.transform.x > walking);
+    }
+
+    #[test]
+    fn movement_uses_partial_block_collision_boxes() {
+        let slab = crate::blocks::BlockRegistry::new()
+            .definition(crate::world::BlockId(4))
+            .collision;
+        let mut player = PlayerController::new(Transform {
+            x: 0.5,
+            y: 2.5,
+            z: 0.5,
+        });
+        player.mode = GameMode::Creative;
+        player.flying = true;
+        for _ in 0..8 {
+            player.tick_with_collision_shapes(
+                MovementInput {
+                    forward: 1.0,
+                    ..Default::default()
+                },
+                0.0,
+                |x, y, z| {
+                    if [x, y, z] == [1, 1, 0] {
+                        slab
+                    } else {
+                        crate::blocks::CollisionShape::EMPTY
+                    }
+                },
+            );
+        }
+        assert!(player.transform.x > 0.7);
+    }
+
+    #[test]
+    fn movement_collides_with_a_tall_shape_above_its_owner_cell() {
+        let fence = crate::blocks::BlockRegistry::new()
+            .definition(crate::world::BlockId(9))
+            .collision;
+        let mut player = PlayerController::new(Transform {
+            x: 0.5,
+            y: 2.35,
+            z: 0.5,
+        });
+        player.mode = GameMode::Creative;
+        player.flying = true;
+        for _ in 0..12 {
+            player.tick_with_collision_shapes(
+                MovementInput {
+                    forward: 1.0,
+                    ..Default::default()
+                },
+                0.0,
+                |x, y, z| {
+                    if [x, y, z] == [1, 0, 0] {
+                        fence
+                    } else {
+                        crate::blocks::CollisionShape::EMPTY
+                    }
+                },
+            );
+        }
+        assert!(player.transform.x < 1.2);
     }
     #[test]
     fn jump_reaches_air_then_returns_to_ground() {

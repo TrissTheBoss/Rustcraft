@@ -594,19 +594,26 @@ unsafe extern "system" fn window_proc(
                         };
                         app.toggle_flight_pending = false;
                         app.jump_was_pressed = app.input.is_pressed(InputKey::Up);
-                        app.player.tick(input, app.yaw as f64, |x, y, z| {
-                            let position = ChunkPos {
-                                x: x.div_euclid(CHUNK_SIZE as i32),
-                                y: y.div_euclid(CHUNK_SIZE as i32),
-                                z: z.div_euclid(CHUNK_SIZE as i32),
-                            };
-                            let lx = x.rem_euclid(CHUNK_SIZE as i32) as usize;
-                            let ly = y.rem_euclid(CHUNK_SIZE as i32) as usize;
-                            let lz = z.rem_euclid(CHUNK_SIZE as i32) as usize;
-                            scene.world.get_chunk(position).is_some_and(|chunk| {
-                                BlockRegistry::new().is_solid(chunk.get(lx, ly, lz).unwrap())
-                            })
-                        });
+                        app.player
+                            .tick_with_collision_shapes(input, app.yaw as f64, |x, y, z| {
+                                let position = ChunkPos {
+                                    x: x.div_euclid(CHUNK_SIZE as i32),
+                                    y: y.div_euclid(CHUNK_SIZE as i32),
+                                    z: z.div_euclid(CHUNK_SIZE as i32),
+                                };
+                                let lx = x.rem_euclid(CHUNK_SIZE as i32) as usize;
+                                let ly = y.rem_euclid(CHUNK_SIZE as i32) as usize;
+                                let lz = z.rem_euclid(CHUNK_SIZE as i32) as usize;
+                                scene
+                                    .world
+                                    .get_chunk(position)
+                                    .map(|chunk| {
+                                        BlockRegistry::new()
+                                            .definition(chunk.get(lx, ly, lz).unwrap())
+                                            .collision
+                                    })
+                                    .unwrap_or(crate::blocks::CollisionShape::EMPTY)
+                            });
                         let center = (
                             (app.player.transform.x / CHUNK_SIZE as f64).floor() as i32,
                             (app.player.transform.z / CHUNK_SIZE as f64).floor() as i32,

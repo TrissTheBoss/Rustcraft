@@ -4,6 +4,10 @@
 
 Backup filenames contain a Unix timestamp and a process-wide numeric sequence. Retention parses and compares both numbers instead of sorting filenames lexicographically, which can misorder sequences once the counter reaches two or more digits and delete a fresh recovery point. A preserved user-selected backup remains pinned while the oldest unpinned snapshot is pruned.
 
+## 2026-11-07 - Use block-local collision geometry for movement and targeting
+
+The block registry supplies prototype collision boxes and the runtime player collider and raycaster query those boxes instead of assuming each non-air block occupies a full cube. Ray traversal checks nearby owner cells so tall shapes can be selected above their base voxel. Collision and selection geometry are still coupled, block states are not stored in world data, and rendering/content definitions are incomplete; these prototypes are not Java Edition conformance evidence.
+
 ## 2026-11-07 - Generate terrain around the active player region
 
 The world store distinguishes the editable/displayed seed from an immutable terrain-generation seed. Save v6 persists both plus the generator version; v1-v4 migrate the generation seed from their existing seed field, and v1-v5 migrate the generator version to the current implementation. Copies preserve the source generation seed even after the displayed seed has been edited. The scene ensures a bounded 5x5 horizontal region exists around the player's chunk and rebuilds the active render mesh set when the player crosses a chunk boundary. Generation preserves existing chunk data and uses the generation seed, so revisiting and reopening a world does not replace edits or vary generated terrain. Save payload v2 marks generated chunks as regenerable; v1 world payloads load conservatively as persistent. The renderer evicts generated chunks outside its retained region, while edited and legacy chunks remain persistent. Region-file paging for very large edited worlds remains outstanding. Current terrain remains original prototype content and has no Java Edition conformance evidence.

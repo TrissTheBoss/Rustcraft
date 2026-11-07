@@ -223,6 +223,83 @@ impl BlockRegistry {
                 collision: CollisionShape::FULL_BLOCK,
                 opaque: true,
             },
+            4 => BlockDefinition {
+                id,
+                name: "slab",
+                collision: BlockState {
+                    kind: BlockKind::Slab,
+                    upper: false,
+                    layers: 1,
+                }
+                .shape(),
+                opaque: true,
+            },
+            5 => BlockDefinition {
+                id,
+                name: "carpet",
+                collision: BlockState {
+                    kind: BlockKind::Carpet,
+                    upper: false,
+                    layers: 1,
+                }
+                .shape(),
+                opaque: false,
+            },
+            6 => BlockDefinition {
+                id,
+                name: "snow layer",
+                collision: BlockState {
+                    kind: BlockKind::Snow,
+                    upper: false,
+                    layers: 1,
+                }
+                .shape(),
+                opaque: false,
+            },
+            7 => BlockDefinition {
+                id,
+                name: "farmland",
+                collision: BlockState {
+                    kind: BlockKind::Farmland,
+                    upper: false,
+                    layers: 1,
+                }
+                .shape(),
+                opaque: true,
+            },
+            8 => BlockDefinition {
+                id,
+                name: "path",
+                collision: BlockState {
+                    kind: BlockKind::Path,
+                    upper: false,
+                    layers: 1,
+                }
+                .shape(),
+                opaque: true,
+            },
+            9 => BlockDefinition {
+                id,
+                name: "fence",
+                collision: BlockState {
+                    kind: BlockKind::Fence,
+                    upper: false,
+                    layers: 1,
+                }
+                .shape(),
+                opaque: false,
+            },
+            10 => BlockDefinition {
+                id,
+                name: "pane",
+                collision: BlockState {
+                    kind: BlockKind::Pane,
+                    upper: false,
+                    layers: 1,
+                }
+                .shape(),
+                opaque: false,
+            },
             _ => BlockDefinition {
                 id,
                 name: "unknown",
@@ -287,6 +364,27 @@ mod tests {
             .boxes()[0]
                 .max[1],
             1.0 / 16.0
+        );
+    }
+
+    #[test]
+    fn prototype_registry_exposes_non_full_collision_shapes() {
+        let registry = BlockRegistry::new();
+        assert_eq!(
+            registry.definition(BlockId(4)).collision.boxes()[0].max[1],
+            0.5
+        );
+        assert_eq!(
+            registry.definition(BlockId(5)).collision.boxes()[0].max[1],
+            1.0 / 16.0
+        );
+        assert_eq!(
+            registry.definition(BlockId(6)).collision.boxes()[0].max[1],
+            1.0 / 8.0
+        );
+        assert_eq!(
+            registry.definition(BlockId(9)).collision.boxes()[0].max[1],
+            1.5
         );
     }
 }
