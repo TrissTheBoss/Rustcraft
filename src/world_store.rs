@@ -17,7 +17,8 @@ const SAVE_MAGIC_V4: &[u8; 8] = b"VXSAVE04";
 const SAVE_MAGIC_V5: &[u8; 8] = b"VXSAVE05";
 const SAVE_MAGIC_V6: &[u8; 8] = b"VXSAVE06";
 const SAVE_MAGIC_V7: &[u8; 8] = b"VXSAVE07";
-const SAVE_VERSION: u32 = 7;
+const SAVE_MAGIC_V8: &[u8; 8] = b"VXSAVE08";
+const SAVE_VERSION: u32 = 8;
 const SAVE_FILE: &str = "world.vxs";
 const BACKUP_DIR: &str = "backups";
 const MAX_NAME_BYTES: usize = 128;
@@ -91,6 +92,7 @@ pub struct WorldMetadata {
     pub game_mode: StoredGameMode,
     pub difficulty: StoredDifficulty,
     pub difficulty_locked: bool,
+    pub keep_inventory: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -246,6 +248,29 @@ impl WorldStore {
         world: World,
         player: PlayerSnapshot,
     ) -> io::Result<StoredWorld> {
+        self.create_with_options_and_rules(
+            name,
+            seed,
+            game_mode,
+            difficulty,
+            difficulty_locked,
+            false,
+            world,
+            player,
+        )
+    }
+
+    pub fn create_with_options_and_rules(
+        &self,
+        name: &str,
+        seed: u64,
+        game_mode: StoredGameMode,
+        difficulty: StoredDifficulty,
+        difficulty_locked: bool,
+        keep_inventory: bool,
+        world: World,
+        player: PlayerSnapshot,
+    ) -> io::Result<StoredWorld> {
         self.create_with_terrain_seed(
             name,
             seed,
@@ -254,6 +279,7 @@ impl WorldStore {
             game_mode,
             difficulty,
             difficulty_locked,
+            keep_inventory,
             world,
             player,
         )
@@ -268,6 +294,7 @@ impl WorldStore {
         game_mode: StoredGameMode,
         difficulty: StoredDifficulty,
         difficulty_locked: bool,
+        keep_inventory: bool,
         world: World,
         player: PlayerSnapshot,
     ) -> io::Result<StoredWorld> {
@@ -291,6 +318,7 @@ impl WorldStore {
                         game_mode,
                         difficulty,
                         difficulty_locked,
+                        keep_inventory,
                     };
                     let mut saved = StoredWorld {
                         metadata,
@@ -394,6 +422,28 @@ impl WorldStore {
         difficulty: StoredDifficulty,
         difficulty_locked: bool,
     ) -> io::Result<StoredWorld> {
+        let keep_inventory = self.load(id)?.metadata.keep_inventory;
+        self.update_options_and_rules(
+            id,
+            name,
+            seed,
+            game_mode,
+            difficulty,
+            difficulty_locked,
+            keep_inventory,
+        )
+    }
+
+    pub fn update_options_and_rules(
+        &self,
+        id: &str,
+        name: &str,
+        seed: u64,
+        game_mode: StoredGameMode,
+        difficulty: StoredDifficulty,
+        difficulty_locked: bool,
+        keep_inventory: bool,
+    ) -> io::Result<StoredWorld> {
         let mut saved = self.load(id)?;
         if saved.metadata.difficulty_locked
             && difficulty_locked
@@ -409,6 +459,7 @@ impl WorldStore {
         saved.metadata.game_mode = game_mode;
         saved.metadata.difficulty = difficulty;
         saved.metadata.difficulty_locked = difficulty_locked;
+        saved.metadata.keep_inventory = keep_inventory;
         self.save(&mut saved.metadata, &saved.world, saved.player.clone())?;
         Ok(saved)
     }
@@ -423,6 +474,7 @@ impl WorldStore {
             source.metadata.game_mode,
             source.metadata.difficulty,
             source.metadata.difficulty_locked,
+            source.metadata.keep_inventory,
             source.world,
             source.player,
         )
@@ -540,6 +592,7 @@ impl WorldStore {
                 game_mode,
                 difficulty,
                 difficulty_locked,
+                keep_inventory: false,
             },
             world,
             player,
@@ -841,7 +894,7 @@ fn encode_save(
     let world_len = u64::try_from(world_bytes.len())
         .map_err(|_| invalid_input("world payload length is invalid"))?;
     let mut output = Vec::with_capacity(world_bytes.len() + 96 + name.len());
-    output.write_all(SAVE_MAGIC_V7)?;
+    output.write_all(SAVE_MAGIC_V8)?;
     output.write_all(&SAVE_VERSION.to_le_bytes())?;
     output.write_all(&name_len.to_le_bytes())?;
     output.write_all(name)?;
@@ -853,6 +906,7 @@ fn encode_save(
     output.write_all(&[metadata.game_mode as u8])?;
     output.write_all(&[metadata.difficulty as u8])?;
     output.write_all(&[u8::from(metadata.difficulty_locked)])?;
+    output.write_all(&[u8::from(metadata.keep_inventory)])?;
     for value in player.position.into_iter().chain(player.velocity) {
         output.write_all(&value.to_le_bytes())?;
     }
@@ -962,6 +1016,7 @@ fn read_metadata<R: Read>(input: &mut R, id: &str) -> io::Result<(WorldMetadata,
         5 => &magic == SAVE_MAGIC_V5,
         6 => &magic == SAVE_MAGIC_V6,
         7 => &magic == SAVE_MAGIC_V7,
+        8 => &magic == SAVE_MAGIC_V8,
         _ => false,
     };
     if !version_matches_magic {
@@ -1006,6 +1061,11 @@ fn read_metadata<R: Read>(input: &mut R, id: &str) -> io::Result<(WorldMetadata,
     } else {
         (StoredDifficulty::Normal, false)
     };
+    let keep_inventory = if version >= 8 {
+        read_bool(input)?
+    } else {
+        false
+    };
     Ok((
         WorldMetadata {
             id: id.to_owned(),
@@ -1018,6 +1078,7 @@ fn read_metadata<R: Read>(input: &mut R, id: &str) -> io::Result<(WorldMetadata,
             game_mode,
             difficulty,
             difficulty_locked,
+            keep_inventory,
         },
         version,
     ))
@@ -1368,6 +1429,7 @@ mod tests {
             .position(|window| window == world_bytes)
             .expect("encoded world payload is present");
         v5.drain(world_start - 18..world_start - 8);
+        remove_v8_keep_inventory(&mut v5);
         let payload_len = v5.len() - 8;
         let checksum = checksum64(&v5[..payload_len]);
         v5[payload_len..].copy_from_slice(&checksum.to_le_bytes());
@@ -1400,12 +1462,39 @@ mod tests {
             .position(|window| window == world_bytes)
             .expect("encoded world payload is present");
         v6.drain(world_start - 18..world_start - 8);
+        remove_v8_keep_inventory(&mut v6);
         v6[..8].copy_from_slice(SAVE_MAGIC_V6);
         v6[8..12].copy_from_slice(&6u32.to_le_bytes());
         let payload_len = v6.len() - 8;
         let checksum = checksum64(&v6[..payload_len]);
         v6[payload_len..].copy_from_slice(&checksum.to_le_bytes());
         v6
+    }
+
+    fn encode_v7_fixture(
+        metadata: &WorldMetadata,
+        player: PlayerSnapshot,
+        world_bytes: &[u8],
+    ) -> Vec<u8> {
+        let mut v7 = encode_save(metadata, player, world_bytes).unwrap();
+        remove_v8_keep_inventory(&mut v7);
+        v7[..8].copy_from_slice(SAVE_MAGIC_V7);
+        v7[8..12].copy_from_slice(&7u32.to_le_bytes());
+        refresh_fixture_checksum(&mut v7);
+        v7
+    }
+
+    fn remove_v8_keep_inventory(bytes: &mut Vec<u8>) {
+        let name_len = u16::from_le_bytes([bytes[12], bytes[13]]) as usize;
+        let keep_inventory_offset = 14 + name_len + 39;
+        bytes.drain(keep_inventory_offset..keep_inventory_offset + 1);
+        refresh_fixture_checksum(bytes);
+    }
+
+    fn refresh_fixture_checksum(bytes: &mut [u8]) {
+        let payload_len = bytes.len() - 8;
+        let checksum = checksum64(&bytes[..payload_len]);
+        bytes[payload_len..].copy_from_slice(&checksum.to_le_bytes());
     }
 
     #[test]
@@ -1544,6 +1633,72 @@ mod tests {
     }
 
     #[test]
+    fn keep_inventory_rule_round_trips_edits_and_world_copies() {
+        let root = TestRoot::new();
+        let store = WorldStore::new(&root.0);
+        let created = store
+            .create_with_options_and_rules(
+                "Keep Items",
+                91,
+                StoredGameMode::Survival,
+                StoredDifficulty::Normal,
+                false,
+                true,
+                test_world(),
+                PlayerSnapshot::default(),
+            )
+            .unwrap();
+        assert!(
+            store
+                .load(&created.metadata.id)
+                .unwrap()
+                .metadata
+                .keep_inventory
+        );
+
+        let edited = store
+            .update_options_and_rules(
+                &created.metadata.id,
+                "Keep Items Updated",
+                92,
+                StoredGameMode::Survival,
+                StoredDifficulty::Hard,
+                false,
+                false,
+            )
+            .unwrap();
+        assert!(!edited.metadata.keep_inventory);
+        assert!(
+            !store
+                .load(&created.metadata.id)
+                .unwrap()
+                .metadata
+                .keep_inventory
+        );
+
+        let enabled = store
+            .update_options_and_rules(
+                &created.metadata.id,
+                "Keep Items Updated",
+                92,
+                StoredGameMode::Survival,
+                StoredDifficulty::Hard,
+                false,
+                true,
+            )
+            .unwrap();
+        let copy = store.copy(&enabled.metadata.id, "Rule Copy").unwrap();
+        assert!(copy.metadata.keep_inventory);
+        assert!(
+            store
+                .load(&copy.metadata.id)
+                .unwrap()
+                .metadata
+                .keep_inventory
+        );
+    }
+
+    #[test]
     fn version_one_worlds_load_with_defaults_and_upgrade_on_next_save() {
         let root = TestRoot::new();
         let store = WorldStore::new(&root.0);
@@ -1570,13 +1725,13 @@ mod tests {
             .unwrap();
 
         let upgraded = read_bounded(&save_path).unwrap();
-        assert_eq!(&upgraded[..8], SAVE_MAGIC_V7);
-        assert_eq!(u32::from_le_bytes(upgraded[8..12].try_into().unwrap()), 7);
+        assert_eq!(&upgraded[..8], SAVE_MAGIC_V8);
+        assert_eq!(u32::from_le_bytes(upgraded[8..12].try_into().unwrap()), 8);
         assert_eq!(store.load(&created.metadata.id).unwrap(), loaded);
     }
 
     #[test]
-    fn version_two_worlds_load_with_empty_player_items_and_upgrade_to_version_seven() {
+    fn version_two_worlds_load_with_empty_player_items_and_upgrade_to_version_eight() {
         let root = TestRoot::new();
         let store = WorldStore::new(&root.0);
         let created = store
@@ -1602,8 +1757,8 @@ mod tests {
             .unwrap();
 
         let upgraded = read_bounded(&save_path).unwrap();
-        assert_eq!(&upgraded[..8], SAVE_MAGIC_V7);
-        assert_eq!(u32::from_le_bytes(upgraded[8..12].try_into().unwrap()), 7);
+        assert_eq!(&upgraded[..8], SAVE_MAGIC_V8);
+        assert_eq!(u32::from_le_bytes(upgraded[8..12].try_into().unwrap()), 8);
         assert_eq!(store.load(&created.metadata.id).unwrap(), loaded);
     }
 
@@ -1645,7 +1800,7 @@ mod tests {
             .save(&mut loaded.metadata, &loaded.world, loaded.player.clone())
             .unwrap();
         let upgraded = read_bounded(&save_path).unwrap();
-        assert_eq!(&upgraded[..8], SAVE_MAGIC_V7);
+        assert_eq!(&upgraded[..8], SAVE_MAGIC_V8);
         assert_eq!(store.load(&created.metadata.id).unwrap(), loaded);
     }
 
@@ -1699,12 +1854,12 @@ mod tests {
             .unwrap();
 
         let upgraded = read_bounded(&save_path).unwrap();
-        assert_eq!(&upgraded[..8], SAVE_MAGIC_V7);
+        assert_eq!(&upgraded[..8], SAVE_MAGIC_V8);
         assert_eq!(store.load(&created.metadata.id).unwrap(), loaded);
     }
 
     #[test]
-    fn version_six_worlds_receive_default_survival_state_and_upgrade_to_seven() {
+    fn version_six_worlds_receive_default_survival_state_and_upgrade_to_eight() {
         let root = TestRoot::new();
         let store = WorldStore::new(&root.0);
         let created = store
@@ -1730,7 +1885,36 @@ mod tests {
             .save(&mut loaded.metadata, &loaded.world, loaded.player.clone())
             .unwrap();
         let upgraded = read_bounded(&path).unwrap();
-        assert_eq!(&upgraded[..8], SAVE_MAGIC_V7);
+        assert_eq!(&upgraded[..8], SAVE_MAGIC_V8);
+        assert_eq!(store.load(&created.metadata.id).unwrap(), loaded);
+    }
+
+    #[test]
+    fn version_seven_worlds_migrate_with_keep_inventory_disabled() {
+        let root = TestRoot::new();
+        let store = WorldStore::new(&root.0);
+        let created = store
+            .create(
+                "Version Seven World",
+                44,
+                StoredGameMode::Survival,
+                test_world(),
+                PlayerSnapshot::default(),
+            )
+            .unwrap();
+        let mut world_bytes = Vec::new();
+        created.world.save(&mut world_bytes).unwrap();
+        let legacy = encode_v7_fixture(&created.metadata, created.player, &world_bytes);
+        let path = store.save_path(&created.metadata.id).unwrap();
+        atomic_write(&path, &legacy).unwrap();
+
+        let mut loaded = store.load(&created.metadata.id).unwrap();
+        assert!(!loaded.metadata.keep_inventory);
+        store
+            .save(&mut loaded.metadata, &loaded.world, loaded.player.clone())
+            .unwrap();
+        let upgraded = read_bounded(&path).unwrap();
+        assert_eq!(&upgraded[..8], SAVE_MAGIC_V8);
         assert_eq!(store.load(&created.metadata.id).unwrap(), loaded);
     }
 

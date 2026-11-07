@@ -89,6 +89,7 @@ const FORM_WORLD_CREATE: usize = 1105;
 const FORM_WORLD_CANCEL: usize = 1106;
 const FORM_WORLD_DIFFICULTY: usize = 1107;
 const FORM_WORLD_DIFFICULTY_LOCKED: usize = 1108;
+const FORM_WORLD_KEEP_INVENTORY: usize = 1109;
 const DIALOG_IDOK: usize = 1;
 const DIALOG_IDCANCEL: usize = 2;
 const INVENTORY_SLOT_ID_BASE: usize = 8000;
@@ -386,6 +387,7 @@ struct WorldCreationForm {
     mode_combo: Hwnd,
     difficulty_combo: Hwnd,
     difficulty_locked: Hwnd,
+    keep_inventory: Hwnd,
     error_label: Hwnd,
 }
 
@@ -717,38 +719,51 @@ unsafe extern "system" fn window_proc(
                                 }
                                 if outcome.became_dead {
                                     app.death_items_retained = false;
-                                    let position = [
-                                        app.player.transform.x,
-                                        app.player.transform.y,
-                                        app.player.transform.z,
-                                    ];
-                                    match app.inventory.drop_all(
-                                        &mut app.drops,
-                                        position,
-                                        ITEM_PICKUP_DELAY_TICKS,
-                                        &app.item_catalog,
-                                    ) {
-                                        Ok(stack_count) => {
-                                            if let Some(scene) = SCENE.as_mut() {
-                                                scene.dirty = true;
-                                                scene.drop_meshes = build_drop_meshes(&app.drops);
-                                                if let Some(gpu) = app.gpu.as_mut() {
-                                                    upload_scene_meshes(gpu, scene);
+                                    let keep_inventory = app
+                                        .world_metadata
+                                        .as_ref()
+                                        .is_some_and(|metadata| metadata.keep_inventory);
+                                    if keep_inventory {
+                                        app.logger.event(
+                                            "INFO",
+                                            "death_inventory_kept",
+                                            "keepInventory is enabled",
+                                        );
+                                    } else {
+                                        let position = [
+                                            app.player.transform.x,
+                                            app.player.transform.y,
+                                            app.player.transform.z,
+                                        ];
+                                        match app.inventory.drop_all(
+                                            &mut app.drops,
+                                            position,
+                                            ITEM_PICKUP_DELAY_TICKS,
+                                            &app.item_catalog,
+                                        ) {
+                                            Ok(stack_count) => {
+                                                if let Some(scene) = SCENE.as_mut() {
+                                                    scene.dirty = true;
+                                                    scene.drop_meshes =
+                                                        build_drop_meshes(&app.drops);
+                                                    if let Some(gpu) = app.gpu.as_mut() {
+                                                        upload_scene_meshes(gpu, scene);
+                                                    }
                                                 }
+                                                app.logger.event(
+                                                    "INFO",
+                                                    "death_inventory_dropped",
+                                                    format!("stacks={stack_count}"),
+                                                );
                                             }
-                                            app.logger.event(
-                                                "INFO",
-                                                "death_inventory_dropped",
-                                                format!("stacks={stack_count}"),
-                                            );
-                                        }
-                                        Err(error) => {
-                                            app.death_items_retained = true;
-                                            app.logger.event(
-                                                "ERROR",
-                                                "death_inventory_drop_failed",
-                                                error.to_string(),
-                                            );
+                                            Err(error) => {
+                                                app.death_items_retained = true;
+                                                app.logger.event(
+                                                    "ERROR",
+                                                    "death_inventory_drop_failed",
+                                                    error.to_string(),
+                                                );
+                                            }
                                         }
                                     }
                                     PostMessageW(window, WM_APP_DEATH, 0, 0);
@@ -2349,7 +2364,13 @@ unsafe fn open_death_form(window: Hwnd) {
         32,
         0,
     ));
-    let status_text = if APP.as_ref().is_some_and(|app| app.death_items_retained) {
+    let status_text = if APP.as_ref().is_some_and(|app| {
+        app.world_metadata
+            .as_ref()
+            .is_some_and(|metadata| metadata.keep_inventory)
+    }) {
+        "Keep inventory is enabled. Your items remain with you."
+    } else if APP.as_ref().is_some_and(|app| app.death_items_retained) {
         "The world could not accept all drops. Your inventory is retained."
     } else {
         "Your inventory drops into the world. Respawn to continue."
@@ -3375,24 +3396,27 @@ unsafe fn open_world_edit_form(window: Hwnd, id: &str) {
 #[allow(static_mut_refs)]
 unsafe fn build_world_form(window: Hwnd, world: Option<StoredWorld>, new_name: String) {
     let editing = world.is_some();
-    let (world_id, name, seed_text, mode, difficulty, difficulty_locked) = match world {
-        Some(world) => (
-            Some(world.metadata.id),
-            world.metadata.name,
-            world.metadata.seed.to_string(),
-            world.metadata.game_mode,
-            world.metadata.difficulty,
-            world.metadata.difficulty_locked,
-        ),
-        None => (
-            None,
-            new_name,
-            String::new(),
-            StoredGameMode::Creative,
-            StoredDifficulty::Normal,
-            false,
-        ),
-    };
+    let (world_id, name, seed_text, mode, difficulty, difficulty_locked, keep_inventory) =
+        match world {
+            Some(world) => (
+                Some(world.metadata.id),
+                world.metadata.name,
+                world.metadata.seed.to_string(),
+                world.metadata.game_mode,
+                world.metadata.difficulty,
+                world.metadata.difficulty_locked,
+                world.metadata.keep_inventory,
+            ),
+            None => (
+                None,
+                new_name,
+                String::new(),
+                StoredGameMode::Creative,
+                StoredDifficulty::Normal,
+                false,
+                false,
+            ),
+        };
     let mut client = Rect {
         left: 0,
         top: 0,
@@ -3401,8 +3425,8 @@ unsafe fn build_world_form(window: Hwnd, world: Option<StoredWorld>, new_name: S
     };
     GetClientRect(window, &mut client);
     let left = ((client.right - 460) / 2).max(12);
-    let top = ((client.bottom - 470) / 2).max(12);
-    let panel = create_form_control(window, "STATIC", "", SS_WHITERECT, left, top, 460, 470, 0);
+    let top = ((client.bottom - 520) / 2).max(12);
+    let panel = create_form_control(window, "STATIC", "", SS_WHITERECT, left, top, 460, 520, 0);
     let mut controls = vec![panel];
     add_form_label(
         window,
@@ -3532,13 +3556,28 @@ unsafe fn build_world_form(window: Hwnd, world: Option<StoredWorld>, new_name: S
         SendMessageW(difficulty_lock, BM_SETCHECK, BST_CHECKED as usize, 0);
         EnableWindow(difficulty_combo, 0);
     }
+    let keep_inventory_check = create_form_control(
+        window,
+        "BUTTON",
+        "Keep inventory on death",
+        BS_AUTOCHECKBOX | WS_TABSTOP,
+        left + 24,
+        top + 322,
+        412,
+        24,
+        FORM_WORLD_KEEP_INVENTORY,
+    );
+    controls.push(keep_inventory_check);
+    if keep_inventory {
+        SendMessageW(keep_inventory_check, BM_SETCHECK, BST_CHECKED as usize, 0);
+    }
     add_form_label(
         window,
         &mut controls,
-        "Options are saved as world metadata. Changing the displayed seed does not alter generated terrain.",
+        "Changing the displayed seed does not alter generated terrain. Rule changes apply to this world.",
         left,
         top,
-        326,
+        352,
     );
     let error_label = create_form_control(
         window,
@@ -3546,7 +3585,7 @@ unsafe fn build_world_form(window: Hwnd, world: Option<StoredWorld>, new_name: S
         "",
         0,
         left + 24,
-        top + 352,
+        top + 383,
         412,
         22,
         FORM_WORLD_ERROR,
@@ -3558,7 +3597,7 @@ unsafe fn build_world_form(window: Hwnd, world: Option<StoredWorld>, new_name: S
         "Cancel",
         BS_PUSHBUTTON | WS_TABSTOP,
         left + 224,
-        top + 410,
+        top + 456,
         100,
         30,
         FORM_WORLD_CANCEL,
@@ -3574,7 +3613,7 @@ unsafe fn build_world_form(window: Hwnd, world: Option<StoredWorld>, new_name: S
         },
         BS_DEFPUSHBUTTON | WS_TABSTOP,
         left + 336,
-        top + 410,
+        top + 456,
         100,
         30,
         FORM_WORLD_CREATE,
@@ -3602,6 +3641,7 @@ unsafe fn build_world_form(window: Hwnd, world: Option<StoredWorld>, new_name: S
         mode_combo,
         difficulty_combo,
         difficulty_locked: difficulty_lock,
+        keep_inventory: keep_inventory_check,
         error_label,
     });
     if let Some(app) = APP.as_mut() {
@@ -3993,6 +4033,7 @@ unsafe fn submit_world_creation_form(window: Hwnd) {
         mode_combo,
         difficulty_combo,
         difficulty_locked,
+        keep_inventory_check,
         error_label,
     )) = WORLD_FORM.as_ref().map(|form| {
         (
@@ -4002,6 +4043,7 @@ unsafe fn submit_world_creation_form(window: Hwnd) {
             form.mode_combo,
             form.difficulty_combo,
             form.difficulty_locked,
+            form.keep_inventory,
             form.error_label,
         )
     })
@@ -4047,6 +4089,7 @@ unsafe fn submit_world_creation_form(window: Hwnd) {
         }
     };
     let is_locked = SendMessageW(difficulty_locked, BM_GETCHECK, 0, 0) == BST_CHECKED;
+    let keep_inventory = SendMessageW(keep_inventory_check, BM_GETCHECK, 0, 0) == BST_CHECKED;
     let Some(app) = APP.as_mut() else {
         return;
     };
@@ -4078,7 +4121,15 @@ unsafe fn submit_world_creation_form(window: Hwnd) {
         }
     }
     if let Some(id) = world_id {
-        match store.update_options(&id, &name, seed, mode, difficulty, is_locked) {
+        match store.update_options_and_rules(
+            &id,
+            &name,
+            seed,
+            mode,
+            difficulty,
+            is_locked,
+            keep_inventory,
+        ) {
             Ok(updated) => {
                 app.logger.event(
                     "INFO",
@@ -4116,12 +4167,13 @@ unsafe fn submit_world_creation_form(window: Hwnd) {
         ..TerrainGenerator::default()
     };
     let world = generator.generate_region(2);
-    match store.create_with_options(
+    match store.create_with_options_and_rules(
         &name,
         seed,
         mode,
         difficulty,
         is_locked,
+        keep_inventory,
         world,
         PlayerSnapshot::default(),
     ) {
@@ -4383,6 +4435,7 @@ unsafe fn open_world_from_menu(window: Hwnd, app: &mut AppState, id: &str) {
 unsafe fn activate_world(window: Hwnd, app: &mut AppState, saved: crate::world_store::StoredWorld) {
     let terrain_seed = saved.metadata.terrain_seed;
     let player_position = saved.player.position;
+    let keep_inventory = saved.metadata.keep_inventory;
     app.player = player_controller(&saved.player, saved.metadata.game_mode);
     app.vitals = PlayerVitals::from_saved_health(saved.player.health).unwrap_or_default();
     app.death_items_retained = false;
@@ -4390,7 +4443,8 @@ unsafe fn activate_world(window: Hwnd, app: &mut AppState, saved: crate::world_s
     app.inventory = saved.player.inventory;
     app.drops = saved.player.drops.clone();
     let mut death_drops_created = false;
-    if app.vitals.is_dead()
+    if !keep_inventory
+        && app.vitals.is_dead()
         && matches!(app.player.mode, GameMode::Survival | GameMode::Adventure)
         && app.inventory.saved_slots().iter().any(Option::is_some)
     {

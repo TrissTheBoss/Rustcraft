@@ -129,3 +129,7 @@ The first interactive surface uses the Windows user32/gdi32 APIs directly and co
 ## 2026-11-06 — Stream chunk persistence from contiguous storage
 
 Chunk persistence reads and writes the existing contiguous block array directly, preserving the y/z/x serialized order while avoiding coordinate indexing and bounds checks for each block. This is a focused runtime optimization of the active world core and does not change the persistence format.
+
+## 2026-11-07 — Persist the keepInventory world rule
+
+Save format v8 adds one boolean world rule, keepInventory. New worlds default it to false; the native world creation/edit form can set or change it, and copies preserve it. A true setting keeps player inventory on death; false uses the transactional drop behavior. Formats v1-v7 migrate with false. This is one isolated gamerule only: no gamerule command system or complete rule catalog exists, and the behavior still needs runtime comparison against the pinned Java Edition baseline before a parity claim.
