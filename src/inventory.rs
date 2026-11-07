@@ -178,6 +178,54 @@ impl Inventory {
         Ok(())
     }
 
+    /// Select or insert a picked item into the hotbar without discarding an
+    /// existing stack. A full inventory rejects the pick unchanged.
+    pub fn pick_item_to_hotbar(
+        &mut self,
+        key: ItemKey,
+        catalog: &ItemCatalog,
+    ) -> Result<usize, InventoryError> {
+        let count = catalog.definition(key.id)?.max_stack_size;
+        if let Some(index) = self.main[..HOTBAR_SLOT_COUNT]
+            .iter()
+            .position(|slot| slot.is_some_and(|stack| stack.key == key))
+        {
+            self.select_hotbar(index)?;
+            return Ok(index);
+        }
+
+        let selected = usize::from(self.selected_hotbar);
+        if let Some(index) = (HOTBAR_SLOT_COUNT..MAIN_SLOT_COUNT)
+            .find(|index| self.main[*index].is_some_and(|stack| stack.key == key))
+        {
+            self.swap(
+                InventorySlot::Main(selected),
+                InventorySlot::Main(index),
+                catalog,
+            )?;
+            return Ok(selected);
+        }
+
+        let picked = Some(ItemStack { key, count });
+        if let Some(index) = self.main[..HOTBAR_SLOT_COUNT]
+            .iter()
+            .position(Option::is_none)
+        {
+            self.main[index] = picked;
+            self.select_hotbar(index)?;
+            return Ok(index);
+        }
+
+        let Some(inventory_index) =
+            (HOTBAR_SLOT_COUNT..MAIN_SLOT_COUNT).find(|index| self.main[*index].is_none())
+        else {
+            return Err(InventoryError::NoCapacity);
+        };
+        self.main[inventory_index] = self.main[selected];
+        self.main[selected] = picked;
+        Ok(selected)
+    }
+
     pub fn selected_stack(&self) -> Option<ItemStack> {
         self.main[self.selected_hotbar as usize]
     }
@@ -805,6 +853,70 @@ mod tests {
             5
         );
         assert_eq!(inventory.count(key(1)), 7);
+    }
+
+    #[test]
+    fn creative_pick_selects_existing_and_inserts_without_losing_stacks() {
+        let catalog = catalog();
+        let mut inventory = Inventory::default();
+        inventory.insert(key(1), 7, &catalog).unwrap();
+        inventory.insert(key(2), 4, &catalog).unwrap();
+
+        assert_eq!(inventory.pick_item_to_hotbar(key(1), &catalog), Ok(0));
+        assert_eq!(inventory.count(key(1)), 7);
+        assert_eq!(inventory.pick_item_to_hotbar(key(2), &catalog), Ok(1));
+        assert_eq!(inventory.selected_hotbar(), 1);
+        assert_eq!(inventory.count(key(2)), 4);
+
+        let variant = ItemKey {
+            id: ItemId(1),
+            variant: 9,
+        };
+        assert_eq!(inventory.pick_item_to_hotbar(variant, &catalog), Ok(2));
+        assert_eq!(
+            inventory
+                .stack(InventorySlot::Main(2))
+                .unwrap()
+                .unwrap()
+                .count,
+            64
+        );
+        assert_eq!(inventory.count(key(1)), 7);
+    }
+
+    #[test]
+    fn creative_pick_replaces_selected_stack_only_after_saving_it_or_rejects() {
+        let catalog = catalog();
+        let mut inventory = Inventory::default();
+        for slot in 0..MAIN_SLOT_COUNT {
+            let key = if slot % 2 == 0 { key(1) } else { key(2) };
+            inventory
+                .set_stack(InventorySlot::Main(slot), Some(ItemStack { key, count: 3 }))
+                .unwrap();
+        }
+        inventory.select_hotbar(4).unwrap();
+        let old = inventory.stack(InventorySlot::Main(4)).unwrap().unwrap();
+        let picked = ItemKey {
+            id: ItemId(1),
+            variant: 5,
+        };
+        assert_eq!(
+            inventory.pick_item_to_hotbar(picked, &catalog),
+            Err(InventoryError::NoCapacity)
+        );
+        assert_eq!(inventory.stack(InventorySlot::Main(4)).unwrap(), Some(old));
+
+        inventory.set_stack(InventorySlot::Main(35), None).unwrap();
+        assert_eq!(inventory.pick_item_to_hotbar(picked, &catalog), Ok(4));
+        assert_eq!(
+            inventory
+                .stack(InventorySlot::Main(4))
+                .unwrap()
+                .unwrap()
+                .key,
+            picked
+        );
+        assert_eq!(inventory.stack(InventorySlot::Main(35)).unwrap(), Some(old));
     }
 
     #[test]

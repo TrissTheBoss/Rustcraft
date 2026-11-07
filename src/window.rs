@@ -128,6 +128,7 @@ const VK_Q: u32 = 0x51;
 const WM_LBUTTONDOWN: u32 = 0x0201;
 const WM_LBUTTONUP: u32 = 0x0202;
 const WM_RBUTTONDOWN: u32 = 0x0204;
+const WM_MBUTTONDOWN: u32 = 0x0207;
 const WM_KILLFOCUS: u32 = 0x0008;
 // The CPU renderer is supersampled 2x in each axis below. Keep the presented
 // target at a 16:9 960x540 cap so the anti-aliased path remains responsive.
@@ -1072,6 +1073,53 @@ unsafe extern "system" fn window_proc(
                 app.jump_was_pressed = false;
                 app.breaking_held = false;
                 app.mining_session.reset();
+            }
+            0
+        }
+        WM_MBUTTONDOWN => {
+            if let Some(app) = APP.as_mut() {
+                if app.dialog_open {
+                    return 0;
+                }
+                if !app.cursor_locked {
+                    app.cursor_locked = true;
+                    ShowCursor(0);
+                    lock_cursor(window);
+                    app.logger
+                        .event("INFO", "cursor_captured", "source=mouse_click");
+                    return 0;
+                }
+                if app.player.mode != GameMode::Creative {
+                    return 0;
+                }
+                let Some(hit) = SCENE
+                    .as_ref()
+                    .and_then(|scene| targeted_block_hit(app, &scene.world))
+                else {
+                    return 0;
+                };
+                let block = hit.block;
+                let key = ItemKey::new(ItemId(block.0));
+                if prototype_block_for_item(key).is_none() {
+                    return 0;
+                }
+                match app.inventory.pick_item_to_hotbar(key, &app.item_catalog) {
+                    Ok(slot) => {
+                        app.selected_block = block;
+                        if let Some(scene) = SCENE.as_mut() {
+                            scene.dirty = true;
+                        }
+                        app.logger.event(
+                            "INFO",
+                            "creative_pick_block",
+                            format!("block={} slot={}", block.0, slot + 1),
+                        );
+                    }
+                    Err(error) => {
+                        app.logger
+                            .event("WARN", "creative_pick_block_rejected", error.to_string())
+                    }
+                }
             }
             0
         }
@@ -2858,7 +2906,7 @@ mod world_creation_tests {
 
     #[test]
     fn only_unmodified_prototype_block_items_map_to_placeable_blocks() {
-        for id in 1..=3 {
+        for id in 1..=10 {
             assert_eq!(
                 prototype_block_for_item(ItemKey::new(ItemId(id))),
                 Some(crate::world::BlockId(id))
@@ -2871,7 +2919,7 @@ mod world_creation_tests {
             }),
             None
         );
-        assert_eq!(prototype_block_for_item(ItemKey::new(ItemId(4))), None);
+        assert_eq!(prototype_block_for_item(ItemKey::new(ItemId(11))), None);
     }
 
     #[test]
@@ -3930,7 +3978,7 @@ fn build_scene(
 
 fn prototype_item_catalog() -> ItemCatalog {
     let mut catalog = ItemCatalog::default();
-    for id in 1..=3 {
+    for id in 1..=10 {
         catalog
             .register(ItemId(id), ItemDefinition::stackable(64))
             .expect("prototype item IDs are unique and valid");
@@ -3939,7 +3987,7 @@ fn prototype_item_catalog() -> ItemCatalog {
 }
 
 fn prototype_block_for_item(key: ItemKey) -> Option<crate::world::BlockId> {
-    (key.variant == 0 && (1..=3).contains(&key.id.0)).then_some(crate::world::BlockId(key.id.0))
+    (key.variant == 0 && (1..=10).contains(&key.id.0)).then_some(crate::world::BlockId(key.id.0))
 }
 
 fn hotbar_slot_after_scroll(current: usize, positive_scroll_steps: i32) -> usize {
