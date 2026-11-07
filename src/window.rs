@@ -121,7 +121,10 @@ const MB_ICONWARNING: u32 = 0x0030;
 const MB_DEFBUTTON2: u32 = 0x0100;
 const TICK_INTERVAL_MS: u32 = 50;
 const VK_ESCAPE: u32 = 0x1B;
+const VK_CONTROL: u32 = 0x11;
 const VK_E: u32 = 0x45;
+const VK_F: u32 = 0x46;
+const VK_Q: u32 = 0x51;
 const WM_LBUTTONDOWN: u32 = 0x0201;
 const WM_LBUTTONUP: u32 = 0x0202;
 const WM_RBUTTONDOWN: u32 = 0x0204;
@@ -229,6 +232,7 @@ extern "system" {
     fn SendMessageW(window: Hwnd, message: u32, wparam: Wparam, lparam: Lparam) -> Lresult;
     fn GetWindowTextLengthW(window: Hwnd) -> i32;
     fn GetWindowTextW(window: Hwnd, text: *mut u16, max_chars: i32) -> i32;
+    fn GetKeyState(key: i32) -> i16;
     fn SetFocus(window: Hwnd) -> Hwnd;
     fn IsDialogMessageW(window: Hwnd, message: *const Message) -> i32;
     fn EnableWindow(window: Hwnd, enable: i32) -> i32;
@@ -904,6 +908,19 @@ unsafe extern "system" fn window_proc(
                     return 0;
                 }
             }
+            if message == WM_KEYDOWN && is_initial_keydown(lparam) {
+                match wparam as u32 {
+                    VK_Q => {
+                        drop_selected_hotbar_items(GetKeyState(VK_CONTROL as i32) < 0);
+                        return 0;
+                    }
+                    VK_F => {
+                        swap_hotbar_item_with_offhand();
+                        return 0;
+                    }
+                    _ => {}
+                }
+            }
             if wparam as u32 == VK_ESCAPE && message == WM_KEYDOWN && is_initial_keydown(lparam) {
                 open_pause_form(window);
                 return 0;
@@ -1468,6 +1485,91 @@ unsafe fn drop_inventory_cursor() {
         Err(error) => set_inventory_status(&format!("Could not drop cursor stack: {error}")),
     }
     refresh_inventory_form();
+}
+
+#[allow(static_mut_refs)]
+unsafe fn drop_selected_hotbar_items(drop_entire_stack: bool) {
+    let result = {
+        let Some(app) = APP.as_mut() else {
+            return;
+        };
+        let player = app.player.transform;
+        let position = [
+            player.x + app.yaw.cos() as f64 * 0.8,
+            player.y + PLAYER_EYE_OFFSET - 0.2,
+            player.z + app.yaw.sin() as f64 * 0.8,
+        ];
+        let slot = InventorySlot::Main(usize::from(app.inventory.selected_hotbar()));
+        let count = app
+            .inventory
+            .selected_stack()
+            .map(|stack| if drop_entire_stack { stack.count } else { 1 })
+            .unwrap_or(1);
+        app.inventory.drop_from_slot(
+            slot,
+            count,
+            &mut app.drops,
+            position,
+            ITEM_PICKUP_DELAY_TICKS,
+            &app.item_catalog,
+        )
+    };
+    match result {
+        Ok(Some(id)) => {
+            if let (Some(app), Some(scene)) = (APP.as_mut(), SCENE.as_mut()) {
+                scene.dirty = true;
+                scene.drop_meshes = build_drop_meshes(&app.drops);
+                if let Some(gpu) = app.gpu.as_mut() {
+                    upload_scene_meshes(gpu, scene);
+                }
+                app.logger.event(
+                    "INFO",
+                    "hotbar_item_dropped",
+                    format!("id={} all={drop_entire_stack}", id.0),
+                );
+            }
+        }
+        Ok(None) => {}
+        Err(error) => {
+            if let Some(app) = APP.as_mut() {
+                app.logger
+                    .event("WARN", "hotbar_drop_rejected", error.to_string());
+            }
+        }
+    }
+}
+
+#[allow(static_mut_refs)]
+unsafe fn swap_hotbar_item_with_offhand() {
+    let result = {
+        let Some(app) = APP.as_mut() else {
+            return;
+        };
+        let selected = InventorySlot::Main(usize::from(app.inventory.selected_hotbar()));
+        app.inventory
+            .swap(selected, InventorySlot::Offhand, &app.item_catalog)
+    };
+    match result {
+        Ok(()) => {
+            if let (Some(app), Some(scene)) = (APP.as_mut(), SCENE.as_mut()) {
+                scene.dirty = true;
+                if let Some(block) = app
+                    .inventory
+                    .selected_stack()
+                    .and_then(|stack| prototype_block_for_item(stack.key))
+                {
+                    app.selected_block = block;
+                }
+                app.logger.event("INFO", "hotbar_offhand_swapped", "");
+            }
+        }
+        Err(error) => {
+            if let Some(app) = APP.as_mut() {
+                app.logger
+                    .event("WARN", "hotbar_offhand_swap_rejected", error.to_string());
+            }
+        }
+    }
 }
 
 #[allow(static_mut_refs)]

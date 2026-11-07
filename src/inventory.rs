@@ -372,6 +372,44 @@ impl Inventory {
         Ok(ItemStack { count, ..stack })
     }
 
+    /// Drop part of a slot stack into the world. Spawn validation happens
+    /// before the slot changes; a failed spawn restores the exact prior stack.
+    pub fn drop_from_slot(
+        &mut self,
+        slot: InventorySlot,
+        count: u16,
+        drops: &mut ItemDrops,
+        position: [f64; 3],
+        pickup_delay_ticks: u16,
+        catalog: &ItemCatalog,
+    ) -> Result<Option<DropId>, DropError> {
+        if count == 0 {
+            return Err(DropError::InvalidStack);
+        }
+        let stack = self.stack(slot).map_err(DropError::Inventory)?;
+        let Some(stack) = stack else {
+            return Ok(None);
+        };
+        if count > stack.count {
+            return Err(DropError::Inventory(InventoryError::NotEnoughItems));
+        }
+        let dropped = ItemStack { count, ..stack };
+        drops.validate_spawn(dropped, position, catalog)?;
+        let remaining = (stack.count > count).then_some(ItemStack {
+            count: stack.count - count,
+            ..stack
+        });
+        self.set_stack(slot, remaining)
+            .map_err(DropError::Inventory)?;
+        match drops.spawn(dropped, position, pickup_delay_ticks, catalog) {
+            Ok(id) => Ok(Some(id)),
+            Err(error) => {
+                let _ = self.set_stack(slot, Some(stack));
+                Err(error)
+            }
+        }
+    }
+
     fn validate_slot(
         &self,
         slot: InventorySlot,
@@ -767,6 +805,80 @@ mod tests {
             5
         );
         assert_eq!(inventory.count(key(1)), 7);
+    }
+
+    #[test]
+    fn dropping_a_slot_preserves_items_on_validation_failure_and_supports_partial_stacks() {
+        let catalog = catalog();
+        let mut inventory = Inventory::default();
+        inventory.insert(key(1), 3, &catalog).unwrap();
+        let mut drops = ItemDrops::default();
+        let slot = InventorySlot::Main(0);
+
+        let id = inventory
+            .drop_from_slot(slot, 1, &mut drops, [1.5, 2.0, 1.5], 4, &catalog)
+            .unwrap()
+            .unwrap();
+        assert_eq!(drops.iter().next().unwrap().id, id);
+        assert_eq!(drops.iter().next().unwrap().stack.count, 1);
+        assert_eq!(inventory.stack(slot).unwrap().unwrap().count, 2);
+
+        let before = inventory;
+        assert_eq!(
+            inventory.drop_from_slot(slot, 1, &mut drops, [f64::NAN, 2.0, 1.5], 4, &catalog),
+            Err(DropError::InvalidPosition)
+        );
+        assert_eq!(inventory, before);
+
+        inventory
+            .drop_from_slot(slot, 2, &mut drops, [1.5, 2.0, 1.5], 4, &catalog)
+            .unwrap()
+            .unwrap();
+        assert_eq!(inventory.stack(slot).unwrap(), None);
+        assert_eq!(drops.iter().map(|item| item.stack.count).sum::<u16>(), 3);
+    }
+
+    #[test]
+    fn swapping_the_selected_main_slot_with_offhand_is_transactional() {
+        let catalog = catalog();
+        let mut inventory = Inventory::default();
+        inventory.insert(key(1), 5, &catalog).unwrap();
+        inventory.insert(key(2), 2, &catalog).unwrap();
+        inventory.select_hotbar(1).unwrap();
+
+        inventory
+            .swap(InventorySlot::Main(1), InventorySlot::Offhand, &catalog)
+            .unwrap();
+        assert_eq!(inventory.stack(InventorySlot::Main(1)).unwrap(), None);
+        assert_eq!(
+            inventory
+                .stack(InventorySlot::Offhand)
+                .unwrap()
+                .unwrap()
+                .key,
+            key(2)
+        );
+
+        inventory
+            .swap(InventorySlot::Main(0), InventorySlot::Offhand, &catalog)
+            .unwrap();
+        assert_eq!(
+            inventory
+                .stack(InventorySlot::Main(0))
+                .unwrap()
+                .unwrap()
+                .key,
+            key(2)
+        );
+        assert_eq!(
+            inventory
+                .stack(InventorySlot::Offhand)
+                .unwrap()
+                .unwrap()
+                .key,
+            key(1)
+        );
+        assert_eq!(inventory.selected_hotbar(), 1);
     }
 
     #[test]

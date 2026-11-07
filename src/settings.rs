@@ -170,7 +170,12 @@ fn valid_bindable_key(key: u16) -> bool {
         || (0x41..=0x5a).contains(&key)
         || (0x70..=0x87).contains(&key)
         || matches!(key, 0x09 | 0x0d | 0x10 | 0x11 | 0x20 | 0x25..=0x28);
-    supported && key != 0x1b && key != 0x45 && !(0x31..=0x39).contains(&key)
+    supported
+        && key != 0x1b
+        && key != 0x45
+        && key != 0x46
+        && key != 0x51
+        && !(0x31..=0x39).contains(&key)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -568,7 +573,7 @@ mod tests {
     #[test]
     fn version_two_settings_migrate_with_hold_behaviors() {
         let mut bindings = KeyBindings::default();
-        bindings.assign(BindingAction::Sprint, 0x46, false).unwrap();
+        bindings.assign(BindingAction::Sprint, 0x47, false).unwrap();
         let old = Settings {
             field_of_view_degrees: 82,
             mouse_sensitivity_permille: 700,
@@ -629,6 +634,14 @@ mod tests {
         );
         assert_eq!(
             bindings.assign(BindingAction::Forward, 0x1b, true),
+            Err(KeyBindingError::ReservedOrInvalid)
+        );
+        assert_eq!(
+            bindings.assign(BindingAction::Forward, 0x46, true),
+            Err(KeyBindingError::ReservedOrInvalid)
+        );
+        assert_eq!(
+            bindings.assign(BindingAction::Forward, 0x51, true),
             Err(KeyBindingError::ReservedOrInvalid)
         );
         bindings.assign(BindingAction::Forward, 0x41, true).unwrap();
