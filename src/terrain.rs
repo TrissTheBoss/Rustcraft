@@ -6,6 +6,7 @@ pub const AIR: BlockId = BlockId(0);
 pub const SOIL: BlockId = BlockId(1);
 pub const SURFACE: BlockId = BlockId(2);
 pub const ROCK: BlockId = BlockId(3);
+pub const CURRENT_TERRAIN_GENERATOR_VERSION: u32 = 1;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct TerrainGenerator {
@@ -71,7 +72,7 @@ impl TerrainGenerator {
         for z in -radius..=radius {
             for x in -radius..=radius {
                 let position = ChunkPos { x, y: 0, z };
-                *world.get_or_create_chunk(position) = self.generate_chunk(position);
+                world.insert_generated_chunk(position, self.generate_chunk(position));
             }
         }
         world
@@ -121,7 +122,7 @@ impl TerrainGenerator {
             return Err("terrain region would exceed the world chunk limit");
         }
         for position in &missing {
-            *world.get_or_create_chunk(*position) = self.generate_chunk(*position);
+            world.insert_generated_chunk(*position, self.generate_chunk(*position));
         }
         Ok(missing)
     }

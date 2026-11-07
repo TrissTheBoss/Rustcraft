@@ -15,7 +15,8 @@ const SAVE_MAGIC_V2: &[u8; 8] = b"VXSAVE02";
 const SAVE_MAGIC_V3: &[u8; 8] = b"VXSAVE03";
 const SAVE_MAGIC_V4: &[u8; 8] = b"VXSAVE04";
 const SAVE_MAGIC_V5: &[u8; 8] = b"VXSAVE05";
-const SAVE_VERSION: u32 = 5;
+const SAVE_MAGIC_V6: &[u8; 8] = b"VXSAVE06";
+const SAVE_VERSION: u32 = 6;
 const SAVE_FILE: &str = "world.vxs";
 const BACKUP_DIR: &str = "backups";
 const MAX_NAME_BYTES: usize = 128;
@@ -78,6 +79,7 @@ pub struct WorldMetadata {
     pub name: String,
     pub seed: u64,
     pub terrain_seed: u64,
+    pub terrain_generator_version: u32,
     pub created_at: u64,
     pub updated_at: u64,
     pub game_mode: StoredGameMode,
@@ -236,6 +238,7 @@ impl WorldStore {
             name,
             seed,
             seed,
+            crate::terrain::CURRENT_TERRAIN_GENERATOR_VERSION,
             game_mode,
             difficulty,
             difficulty_locked,
@@ -249,6 +252,7 @@ impl WorldStore {
         name: &str,
         seed: u64,
         terrain_seed: u64,
+        terrain_generator_version: u32,
         game_mode: StoredGameMode,
         difficulty: StoredDifficulty,
         difficulty_locked: bool,
@@ -269,6 +273,7 @@ impl WorldStore {
                         name,
                         seed,
                         terrain_seed,
+                        terrain_generator_version,
                         created_at: now,
                         updated_at: now,
                         game_mode,
@@ -402,6 +407,7 @@ impl WorldStore {
             name,
             source.metadata.seed,
             source.metadata.terrain_seed,
+            source.metadata.terrain_generator_version,
             source.metadata.game_mode,
             source.metadata.difficulty,
             source.metadata.difficulty_locked,
@@ -516,6 +522,7 @@ impl WorldStore {
                 name,
                 seed,
                 terrain_seed: seed,
+                terrain_generator_version: crate::terrain::CURRENT_TERRAIN_GENERATOR_VERSION,
                 created_at: now,
                 updated_at: now,
                 game_mode,
@@ -804,6 +811,12 @@ fn encode_save(
 ) -> io::Result<Vec<u8>> {
     validate_name(&metadata.name)?;
     validate_player(&player)?;
+    if metadata.terrain_generator_version != crate::terrain::CURRENT_TERRAIN_GENERATOR_VERSION {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "terrain generator version is unsupported",
+        ));
+    }
     if world_bytes.len() > MAX_SAVE_BYTES {
         return Err(invalid_input("world save exceeds the current size limit"));
     }
@@ -813,12 +826,13 @@ fn encode_save(
     let world_len = u64::try_from(world_bytes.len())
         .map_err(|_| invalid_input("world payload length is invalid"))?;
     let mut output = Vec::with_capacity(world_bytes.len() + 96 + name.len());
-    output.write_all(SAVE_MAGIC_V5)?;
+    output.write_all(SAVE_MAGIC_V6)?;
     output.write_all(&SAVE_VERSION.to_le_bytes())?;
     output.write_all(&name_len.to_le_bytes())?;
     output.write_all(name)?;
     output.write_all(&metadata.seed.to_le_bytes())?;
     output.write_all(&metadata.terrain_seed.to_le_bytes())?;
+    output.write_all(&metadata.terrain_generator_version.to_le_bytes())?;
     output.write_all(&metadata.created_at.to_le_bytes())?;
     output.write_all(&metadata.updated_at.to_le_bytes())?;
     output.write_all(&[metadata.game_mode as u8])?;
@@ -923,6 +937,7 @@ fn read_metadata<R: Read>(input: &mut R, id: &str) -> io::Result<(WorldMetadata,
         3 => &magic == SAVE_MAGIC_V3,
         4 => &magic == SAVE_MAGIC_V4,
         5 => &magic == SAVE_MAGIC_V5,
+        6 => &magic == SAVE_MAGIC_V6,
         _ => false,
     };
     if !version_matches_magic {
@@ -941,6 +956,17 @@ fn read_metadata<R: Read>(input: &mut R, id: &str) -> io::Result<(WorldMetadata,
     let name = validate_name(&name).map_err(|_| invalid_data("invalid saved world name"))?;
     let seed = read_u64(input)?;
     let terrain_seed = if version >= 5 { read_u64(input)? } else { seed };
+    let terrain_generator_version = if version >= 6 {
+        read_u32(input)?
+    } else {
+        crate::terrain::CURRENT_TERRAIN_GENERATOR_VERSION
+    };
+    if terrain_generator_version != crate::terrain::CURRENT_TERRAIN_GENERATOR_VERSION {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "terrain generator version is unsupported",
+        ));
+    }
     let created_at = read_u64(input)?;
     let updated_at = read_u64(input)?;
     let mut game_mode = [0];
@@ -962,6 +988,7 @@ fn read_metadata<R: Read>(input: &mut R, id: &str) -> io::Result<(WorldMetadata,
             name,
             seed,
             terrain_seed,
+            terrain_generator_version,
             created_at,
             updated_at,
             game_mode,
@@ -1307,6 +1334,13 @@ mod tests {
     ) -> Vec<u8> {
         let mut v5 = encode_save(metadata, player, world_bytes).unwrap();
         let name_len = u16::from_le_bytes([v5[12], v5[13]]) as usize;
+        let generator_version_offset = 14 + name_len + 16;
+        v5.drain(generator_version_offset..generator_version_offset + 4);
+        v5[..8].copy_from_slice(SAVE_MAGIC_V5);
+        v5[8..12].copy_from_slice(&5u32.to_le_bytes());
+        let payload_len = v5.len() - 8;
+        let checksum = checksum64(&v5[..payload_len]);
+        v5[payload_len..].copy_from_slice(&checksum.to_le_bytes());
         let terrain_seed_offset = 14 + name_len + 8;
         v5.drain(terrain_seed_offset..terrain_seed_offset + 8);
         v5[..8].copy_from_slice(SAVE_MAGIC_V4);
@@ -1476,13 +1510,13 @@ mod tests {
             .unwrap();
 
         let upgraded = read_bounded(&save_path).unwrap();
-        assert_eq!(&upgraded[..8], SAVE_MAGIC_V5);
-        assert_eq!(u32::from_le_bytes(upgraded[8..12].try_into().unwrap()), 5);
+        assert_eq!(&upgraded[..8], SAVE_MAGIC_V6);
+        assert_eq!(u32::from_le_bytes(upgraded[8..12].try_into().unwrap()), 6);
         assert_eq!(store.load(&created.metadata.id).unwrap(), loaded);
     }
 
     #[test]
-    fn version_two_worlds_load_with_empty_player_items_and_upgrade_to_version_five() {
+    fn version_two_worlds_load_with_empty_player_items_and_upgrade_to_version_six() {
         let root = TestRoot::new();
         let store = WorldStore::new(&root.0);
         let created = store
@@ -1508,8 +1542,8 @@ mod tests {
             .unwrap();
 
         let upgraded = read_bounded(&save_path).unwrap();
-        assert_eq!(&upgraded[..8], SAVE_MAGIC_V5);
-        assert_eq!(u32::from_le_bytes(upgraded[8..12].try_into().unwrap()), 5);
+        assert_eq!(&upgraded[..8], SAVE_MAGIC_V6);
+        assert_eq!(u32::from_le_bytes(upgraded[8..12].try_into().unwrap()), 6);
         assert_eq!(store.load(&created.metadata.id).unwrap(), loaded);
     }
 
@@ -1551,7 +1585,7 @@ mod tests {
             .save(&mut loaded.metadata, &loaded.world, loaded.player.clone())
             .unwrap();
         let upgraded = read_bounded(&save_path).unwrap();
-        assert_eq!(&upgraded[..8], SAVE_MAGIC_V5);
+        assert_eq!(&upgraded[..8], SAVE_MAGIC_V6);
         assert_eq!(store.load(&created.metadata.id).unwrap(), loaded);
     }
 
@@ -1605,7 +1639,7 @@ mod tests {
             .unwrap();
 
         let upgraded = read_bounded(&save_path).unwrap();
-        assert_eq!(&upgraded[..8], SAVE_MAGIC_V5);
+        assert_eq!(&upgraded[..8], SAVE_MAGIC_V6);
         assert_eq!(store.load(&created.metadata.id).unwrap(), loaded);
     }
 
@@ -1641,6 +1675,93 @@ mod tests {
         assert_eq!(copied.metadata.seed, 91);
         assert_eq!(copied.metadata.terrain_seed, 19);
         assert_eq!(store.load(&copied.metadata.id).unwrap(), copied);
+    }
+
+    #[test]
+    fn evicted_generated_chunks_regenerate_after_reload_without_losing_edits() {
+        let root = TestRoot::new();
+        let store = WorldStore::new(&root.0);
+        let generator = crate::terrain::TerrainGenerator::default();
+        let edited_position = [-31, 15, 1];
+        let mut world = generator.generate_region(2);
+        world.set_block(edited_position, BlockId(5));
+
+        let active_region: Vec<_> = (-1..=3)
+            .flat_map(|z| (-1..=3).map(move |x| ChunkPos { x, y: 0, z }))
+            .collect();
+        generator
+            .ensure_region(&mut world, ChunkPos { x: 1, y: 0, z: 1 }, 2)
+            .unwrap();
+        world.evict_generated_chunks_outside(&active_region);
+        assert_eq!(world.chunk_count(), 26);
+
+        let saved = store
+            .create(
+                "Streamed World",
+                generator.seed,
+                StoredGameMode::Creative,
+                world,
+                PlayerSnapshot::default(),
+            )
+            .unwrap();
+        let mut loaded = store.load(&saved.metadata.id).unwrap();
+        assert_eq!(loaded.world.chunk_count(), 26);
+        assert_eq!(loaded.world.block_at(edited_position), Some(BlockId(5)));
+        assert!(!loaded
+            .world
+            .is_generated_chunk(ChunkPos { x: -2, y: 0, z: 0 }));
+        assert!(loaded
+            .world
+            .is_generated_chunk(ChunkPos { x: 3, y: 0, z: 0 }));
+
+        let origin_region: Vec<_> = (-2..=2)
+            .flat_map(|z| (-2..=2).map(move |x| ChunkPos { x, y: 0, z }))
+            .collect();
+        generator
+            .ensure_region(&mut loaded.world, ChunkPos::default(), 2)
+            .unwrap();
+        loaded.world.evict_generated_chunks_outside(&origin_region);
+        assert_eq!(loaded.world.chunk_count(), 25);
+        assert_eq!(loaded.world.block_at(edited_position), Some(BlockId(5)));
+        assert_eq!(
+            loaded.world.get_chunk(ChunkPos { x: 0, y: 0, z: 0 }),
+            Some(&generator.generate_chunk(ChunkPos { x: 0, y: 0, z: 0 }))
+        );
+    }
+
+    #[test]
+    fn unsupported_terrain_generator_versions_are_rejected_without_downgrade() {
+        let root = TestRoot::new();
+        let store = WorldStore::new(&root.0);
+        let created = store
+            .create(
+                "Generator Version World",
+                43,
+                StoredGameMode::Creative,
+                test_world(),
+                PlayerSnapshot::default(),
+            )
+            .unwrap();
+        let path = store.save_path(&created.metadata.id).unwrap();
+        let mut bytes = read_bounded(&path).unwrap();
+        let name_len = u16::from_le_bytes([bytes[12], bytes[13]]) as usize;
+        let generator_version_offset = 14 + name_len + 16;
+        bytes[generator_version_offset..generator_version_offset + 4]
+            .copy_from_slice(&99u32.to_le_bytes());
+        let checksum_offset = bytes.len() - 8;
+        let checksum = checksum64(&bytes[..checksum_offset]);
+        bytes[checksum_offset..].copy_from_slice(&checksum.to_le_bytes());
+        atomic_write(&path, &bytes).unwrap();
+
+        assert_eq!(
+            store.load(&created.metadata.id).unwrap_err().kind(),
+            io::ErrorKind::Unsupported
+        );
+        assert_eq!(
+            store.list().unwrap()[0].health,
+            WorldHealth::UnsupportedVersion
+        );
+        assert_eq!(read_bounded(&path).unwrap(), bytes);
     }
 
     #[test]

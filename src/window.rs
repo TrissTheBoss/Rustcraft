@@ -2776,7 +2776,7 @@ mod world_creation_tests {
     fn scene_streams_render_region_around_player_without_replacing_edits() {
         let generator = TerrainGenerator::default();
         let mut world = generator.generate_region(2);
-        world.set_block([1, 15, 1], ROCK);
+        world.set_block([-31, 15, 1], ROCK);
         let mut scene = build_scene(world, generator, (0, 0));
 
         assert_eq!(scene.mesh_positions.len(), 25);
@@ -2792,10 +2792,12 @@ mod world_creation_tests {
             .world
             .get_chunk(ChunkPos { x: 3, y: 0, z: 0 })
             .is_some());
-        assert_eq!(scene.world.block_at([1, 15, 1]), Some(ROCK));
+        assert_eq!(scene.world.chunk_count(), 26);
+        assert_eq!(scene.world.block_at([-31, 15, 1]), Some(ROCK));
         assert!(!scene.stream_to((1, 0)).unwrap());
         assert!(scene.stream_to((0, 0)).unwrap());
-        assert_eq!(scene.world.block_at([1, 15, 1]), Some(ROCK));
+        assert_eq!(scene.world.chunk_count(), 25);
+        assert_eq!(scene.world.block_at([-31, 15, 1]), Some(ROCK));
     }
 }
 
@@ -3640,6 +3642,7 @@ impl Scene {
             self.failed_stream_center = Some(center);
             return Err(error);
         }
+        self.world.evict_generated_chunks_outside(&positions);
         self.meshes = positions
             .iter()
             .map(|position| {
@@ -3682,11 +3685,12 @@ fn region_positions(center: (i32, i32), radius: i32) -> Result<Vec<ChunkPos>, &'
 }
 
 fn build_scene(
-    world: crate::world::World,
+    mut world: crate::world::World,
     terrain_generator: TerrainGenerator,
     stream_center: (i32, i32),
 ) -> Scene {
     let mesh_positions = region_positions(stream_center, STREAM_RADIUS).unwrap_or_default();
+    world.evict_generated_chunks_outside(&mesh_positions);
     let mut materials = MaterialRegistry::default();
     let extracted = std::path::Path::new("assets/extracted/textures/blocks");
     let mut texture = |name: &str| {

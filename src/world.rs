@@ -1,9 +1,11 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{self, Read, Write};
 
 pub const CHUNK_SIZE: usize = 16;
 pub const CHUNK_VOLUME: usize = CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE;
-/// Bound file-driven allocation until chunk streaming and region paging exist.
+const WORLD_MAGIC_V1: &[u8; 8] = b"VOXEL01\0";
+const WORLD_MAGIC_V2: &[u8; 8] = b"VOXEL02\0";
+/// Bound persistent world chunks and the current generated chunk cache.
 pub const MAX_SERIALIZED_CHUNKS: usize = 16_384;
 
 #[derive(Clone, Copy, Debug, Default, Eq, Ord, PartialEq, PartialOrd)]
@@ -66,6 +68,7 @@ fn index(x: usize, y: usize, z: usize) -> Result<usize, &'static str> {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct World {
     chunks: HashMap<ChunkPos, Chunk>,
+    generated_chunks: HashSet<ChunkPos>,
 }
 
 impl World {
@@ -76,12 +79,41 @@ impl World {
         self.chunks.len()
     }
     pub fn get_or_create_chunk(&mut self, position: ChunkPos) -> &mut Chunk {
+        self.generated_chunks.remove(&position);
         self.chunks.entry(position).or_insert_with(Chunk::empty)
+    }
+
+    pub fn insert_generated_chunk(&mut self, position: ChunkPos, chunk: Chunk) {
+        if let std::collections::hash_map::Entry::Vacant(entry) = self.chunks.entry(position) {
+            entry.insert(chunk);
+            self.generated_chunks.insert(position);
+        }
+    }
+
+    pub fn is_generated_chunk(&self, position: ChunkPos) -> bool {
+        self.generated_chunks.contains(&position)
+    }
+
+    /// Discard only generated chunks outside the retained render region.
+    /// Edited and legacy-loaded chunks are never eligible for eviction.
+    pub fn evict_generated_chunks_outside(&mut self, retained: &[ChunkPos]) -> Vec<ChunkPos> {
+        let evicted: Vec<_> = self
+            .generated_chunks
+            .iter()
+            .filter(|position| !retained.contains(position))
+            .copied()
+            .collect();
+        for position in &evicted {
+            self.generated_chunks.remove(position);
+            self.chunks.remove(position);
+        }
+        evicted
     }
     pub fn get_chunk(&self, position: ChunkPos) -> Option<&Chunk> {
         self.chunks.get(&position)
     }
     pub fn get_chunk_mut(&mut self, position: ChunkPos) -> Option<&mut Chunk> {
+        self.generated_chunks.remove(&position);
         self.chunks.get_mut(&position)
     }
 
@@ -106,6 +138,7 @@ impl World {
         Some(previous)
     }
     pub fn unload_chunk(&mut self, position: ChunkPos) -> Option<Chunk> {
+        self.generated_chunks.remove(&position);
         self.chunks.remove(&position)
     }
 
@@ -119,7 +152,7 @@ impl World {
         let count = u32::try_from(self.chunks.len()).map_err(|_| {
             io::Error::new(io::ErrorKind::InvalidInput, "too many chunks to serialize")
         })?;
-        output.write_all(b"VOXEL01\0")?;
+        output.write_all(WORLD_MAGIC_V2)?;
         output.write_all(&count.to_le_bytes())?;
         let mut positions: Vec<_> = self.chunks.keys().copied().collect();
         positions.sort_by_key(|p| (p.x, p.y, p.z));
@@ -127,6 +160,7 @@ impl World {
             output.write_all(&position.x.to_le_bytes())?;
             output.write_all(&position.y.to_le_bytes())?;
             output.write_all(&position.z.to_le_bytes())?;
+            output.write_all(&[u8::from(self.generated_chunks.contains(&position))])?;
             self.chunks[&position].write_blocks(&mut output)?;
         }
         Ok(())
@@ -140,12 +174,16 @@ impl World {
         let mut input = input;
         let mut header = [0; 8];
         input.read_exact(&mut header)?;
-        if &header != b"VOXEL01\0" {
+        let version = if &header == WORLD_MAGIC_V1 {
+            1
+        } else if &header == WORLD_MAGIC_V2 {
+            2
+        } else {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "invalid world header",
             ));
-        }
+        };
         let count = read_u32(&mut input)? as usize;
         if count > max_chunks.min(MAX_SERIALIZED_CHUNKS) {
             return Err(io::Error::new(
@@ -166,9 +204,19 @@ impl World {
                     "world contains a duplicate chunk coordinate",
                 ));
             }
+            let generated = if version >= 2 {
+                read_bool(&mut input)?
+            } else {
+                false
+            };
             world
-                .get_or_create_chunk(position)
+                .chunks
+                .entry(position)
+                .or_insert_with(Chunk::empty)
                 .read_blocks(&mut input)?;
+            if generated {
+                world.generated_chunks.insert(position);
+            }
         }
         Ok(world)
     }
@@ -202,6 +250,19 @@ fn read_u32<R: Read>(input: &mut R) -> io::Result<u32> {
 }
 fn read_i32<R: Read>(input: &mut R) -> io::Result<i32> {
     Ok(read_u32(input)? as i32)
+}
+
+fn read_bool<R: Read>(input: &mut R) -> io::Result<bool> {
+    let mut byte = [0];
+    input.read_exact(&mut byte)?;
+    match byte[0] {
+        0 => Ok(false),
+        1 => Ok(true),
+        _ => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid generated-chunk marker",
+        )),
+    }
 }
 
 #[cfg(test)]
@@ -249,6 +310,60 @@ mod tests {
         bytes[8..12].copy_from_slice(&2u32.to_le_bytes());
         let chunk_record = bytes[12..].to_vec();
         bytes.extend(chunk_record);
+        assert_eq!(
+            World::load(bytes.as_slice()).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+    }
+
+    #[test]
+    fn generated_chunk_provenance_survives_save_and_edits_make_chunks_persistent() {
+        let generated = ChunkPos { x: -2, y: 0, z: 3 };
+        let edited = ChunkPos { x: -1, y: 0, z: 3 };
+        let mut world = World::new();
+        world.insert_generated_chunk(generated, Chunk::empty());
+        world.insert_generated_chunk(edited, Chunk::empty());
+        assert!(world.is_generated_chunk(generated));
+        assert!(world.is_generated_chunk(edited));
+
+        world.set_block([-1, 1, 48], BlockId(5));
+        assert!(!world.is_generated_chunk(edited));
+        let mut bytes = Vec::new();
+        world.save(&mut bytes).unwrap();
+        let mut loaded = World::load(bytes.as_slice()).unwrap();
+        assert!(loaded.is_generated_chunk(generated));
+        assert!(!loaded.is_generated_chunk(edited));
+
+        assert_eq!(loaded.evict_generated_chunks_outside(&[]), vec![generated]);
+        assert_eq!(loaded.get_chunk(generated), None);
+        assert_eq!(loaded.block_at([-1, 1, 48]), Some(BlockId(5)));
+        assert_eq!(loaded.chunk_count(), 1);
+    }
+
+    #[test]
+    fn legacy_world_payload_chunks_load_as_persistent() {
+        let position = ChunkPos { x: -1, y: 0, z: 2 };
+        let mut bytes = WORLD_MAGIC_V1.to_vec();
+        bytes.extend(1u32.to_le_bytes());
+        bytes.extend(position.x.to_le_bytes());
+        bytes.extend(position.y.to_le_bytes());
+        bytes.extend(position.z.to_le_bytes());
+        Chunk::empty().write_blocks(&mut bytes).unwrap();
+
+        let mut world = World::load(bytes.as_slice()).unwrap();
+        assert_eq!(world.chunk_count(), 1);
+        assert!(!world.is_generated_chunk(position));
+        assert!(world.evict_generated_chunks_outside(&[]).is_empty());
+        assert!(world.get_chunk(position).is_some());
+    }
+
+    #[test]
+    fn generated_chunk_marker_rejects_unknown_values() {
+        let mut world = World::new();
+        world.insert_generated_chunk(ChunkPos::default(), Chunk::empty());
+        let mut bytes = Vec::new();
+        world.save(&mut bytes).unwrap();
+        bytes[24] = 2;
         assert_eq!(
             World::load(bytes.as_slice()).unwrap_err().kind(),
             io::ErrorKind::InvalidData
