@@ -42,6 +42,10 @@ The Windows prototype uses an application-data world directory, a versioned sing
 
 The Windows prototype exposes save, create, edit options, copy, delete, open-ready-world, and backup recovery actions through a native menu so persisted worlds can be exercised before a complete custom UI exists. Corrupt, missing, and newer-format worlds are displayed as unavailable; switching saves the current dirty world first and is blocked if that save fails. Save format v2 adds difficulty and difficulty-lock metadata while v1 saves load with Normal/unlocked defaults and upgrade on their next save. Editing the seed updates metadata only; it does not regenerate existing chunks. Difficulty locking requires explicitly unlocking before changing an already locked difficulty. These controls do not yet implement difficulty or all mode rules in gameplay and do not satisfy the PRD's final menu/UI requirements.
 
+## 2026-11-07 â€” Preserve Adventure mode and deny unsupported edits
+
+Adventure remains a distinct stored/player mode when a world is reopened. The current player controller applies ordinary ground movement and disallows Creative flight; block edits are rejected until the engine has item permissions and block tags. This conservative behavior prevents the prototype from silently treating Adventure as Survival or granting unsupported edits; it is explicitly incomplete relative to the pinned game's Adventure rules.
+
 ## 2026-11-07 — Keep world management in the storage boundary
 
 World rename, copy, and delete operations belong to `WorldStore`, so UI actions share the same validation and save semantics. Rename preserves a prior snapshot, copies receive a new world ID while retaining source seed/mode/player/world data, and deletion validates the world directory before removing it. The prototype menu confirms deletion and disallows deleting the active world. Save and directory symlinks are rejected to prevent world operations from following paths outside the store.

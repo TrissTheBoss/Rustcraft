@@ -24,7 +24,16 @@ pub const SPRINT_SPEED_PER_TICK: f64 = 5.612 / TICKS_PER_SECOND;
 pub enum GameMode {
     Survival,
     Creative,
+    Adventure,
     Spectator,
+}
+
+impl GameMode {
+    /// Adventure block permissions require item and block-tag data that is not
+    /// present yet, so the current prototype denies edits in that mode.
+    pub const fn can_edit_blocks(self) -> bool {
+        matches!(self, Self::Survival | Self::Creative)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -277,6 +286,35 @@ mod tests {
             |_, _, _| false,
         );
         assert!(player.transform.y > 10.0);
+    }
+
+    #[test]
+    fn adventure_mode_is_preserved_as_a_distinct_non_flying_mode() {
+        let mut player = PlayerController::new(Transform {
+            x: 0.0,
+            y: 10.0,
+            z: 0.0,
+        });
+        player.mode = GameMode::Adventure;
+        player.tick(
+            MovementInput {
+                toggle_flight: true,
+                ..Default::default()
+            },
+            0.0,
+            |_, _, _| false,
+        );
+        assert!(!player.flying);
+        assert!(player.velocity[1] < 0.0);
+        assert!(!player.mode.can_edit_blocks());
+    }
+
+    #[test]
+    fn survival_and_creative_allow_prototype_block_edits() {
+        assert!(GameMode::Survival.can_edit_blocks());
+        assert!(GameMode::Creative.can_edit_blocks());
+        assert!(!GameMode::Adventure.can_edit_blocks());
+        assert!(!GameMode::Spectator.can_edit_blocks());
     }
 
     #[test]

@@ -1308,7 +1308,8 @@ fn optional_seed(text: &str) -> Result<u64, ()> {
 
 #[cfg(test)]
 mod world_creation_tests {
-    use super::optional_seed;
+    use super::{optional_seed, player_controller, stored_game_mode, GameMode, StoredGameMode};
+    use crate::world_store::PlayerSnapshot;
 
     #[test]
     fn seed_field_accepts_decimal_and_hex_and_rejects_invalid_values() {
@@ -1324,6 +1325,13 @@ mod world_creation_tests {
     fn blank_seed_generates_a_value() {
         assert!(optional_seed("").unwrap() > 0);
         assert!(optional_seed("   ").unwrap() > 0);
+    }
+
+    #[test]
+    fn adventure_mode_survives_player_controller_round_trip() {
+        let player = player_controller(PlayerSnapshot::default(), StoredGameMode::Adventure);
+        assert_eq!(player.mode, GameMode::Adventure);
+        assert_eq!(stored_game_mode(player.mode), StoredGameMode::Adventure);
     }
 }
 
@@ -2077,6 +2085,14 @@ fn queue_block_action(app: &mut AppState, breaking: bool) {
 }
 
 fn handle_block_action(app: &mut AppState, scene: &mut Scene, breaking: bool) {
+    if !app.player.mode.can_edit_blocks() {
+        app.logger.event(
+            "INFO",
+            "block_action_rejected",
+            format!("mode={:?}", app.player.mode),
+        );
+        return;
+    }
     let player = app.player.transform;
     let origin = [player.x, player.y + PLAYER_EYE_OFFSET, player.z];
     let direction = [
@@ -2157,8 +2173,9 @@ fn player_controller(snapshot: PlayerSnapshot, mode: StoredGameMode) -> PlayerCo
     player.velocity = snapshot.velocity;
     player.mode = match mode {
         StoredGameMode::Creative => GameMode::Creative,
+        StoredGameMode::Adventure => GameMode::Adventure,
         StoredGameMode::Spectator => GameMode::Spectator,
-        StoredGameMode::Survival | StoredGameMode::Adventure => GameMode::Survival,
+        StoredGameMode::Survival => GameMode::Survival,
     };
     player.flying = snapshot.flying;
     player.grounded = snapshot.grounded;
@@ -2169,6 +2186,7 @@ fn stored_game_mode(mode: GameMode) -> StoredGameMode {
     match mode {
         GameMode::Survival => StoredGameMode::Survival,
         GameMode::Creative => StoredGameMode::Creative,
+        GameMode::Adventure => StoredGameMode::Adventure,
         GameMode::Spectator => StoredGameMode::Spectator,
     }
 }
