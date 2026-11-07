@@ -163,15 +163,9 @@ impl ItemDrops {
         pickup_delay_ticks: u16,
         catalog: &ItemCatalog,
     ) -> Result<DropId, DropError> {
-        if !valid_position(position) {
-            return Err(DropError::InvalidPosition);
-        }
-        ItemStack::new(stack.key, stack.count, catalog).map_err(|_| DropError::InvalidStack)?;
-        if self.items.len() >= MAX_DROPPED_ITEMS {
-            return Err(DropError::Capacity);
-        }
+        self.validate_spawn(stack, position, catalog)?;
         let id = DropId(self.next_id);
-        self.next_id = self.next_id.checked_add(1).ok_or(DropError::IdExhausted)?;
+        self.next_id += 1;
         self.items.insert(
             id,
             DroppedItem {
@@ -184,6 +178,23 @@ impl ItemDrops {
             },
         );
         Ok(id)
+    }
+
+    pub(crate) fn validate_spawn(
+        &self,
+        stack: ItemStack,
+        position: [f64; 3],
+        catalog: &ItemCatalog,
+    ) -> Result<(), DropError> {
+        if !valid_position(position) {
+            return Err(DropError::InvalidPosition);
+        }
+        ItemStack::new(stack.key, stack.count, catalog).map_err(|_| DropError::InvalidStack)?;
+        if self.items.len() >= MAX_DROPPED_ITEMS {
+            return Err(DropError::Capacity);
+        }
+        self.next_id.checked_add(1).ok_or(DropError::IdExhausted)?;
+        Ok(())
     }
 
     /// Advance items in ascending stable ID order. A pickup may insert only a

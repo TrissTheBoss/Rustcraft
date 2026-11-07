@@ -368,6 +368,64 @@ impl Mesh {
     }
 }
 
+/// Build a small axis-aligned cube mesh for lightweight world entities such
+/// as prototype dropped items. Positions are world-space block units.
+pub fn cube_mesh(center: [f64; 3], half_extent: f64, block: BlockId) -> Mesh {
+    if !center.iter().all(|value| value.is_finite())
+        || !half_extent.is_finite()
+        || half_extent <= 0.0
+    {
+        return Mesh::default();
+    }
+    let faces: [([f32; 3], [[f64; 3]; 4]); 6] = [
+        (
+            [1.0, 0.0, 0.0],
+            [[1., 0., 0.], [1., 1., 0.], [1., 1., 1.], [1., 0., 1.]],
+        ),
+        (
+            [-1.0, 0.0, 0.0],
+            [[0., 0., 1.], [0., 1., 1.], [0., 1., 0.], [0., 0., 0.]],
+        ),
+        (
+            [0.0, 1.0, 0.0],
+            [[0., 1., 1.], [1., 1., 1.], [1., 1., 0.], [0., 1., 0.]],
+        ),
+        (
+            [0.0, -1.0, 0.0],
+            [[0., 0., 0.], [1., 0., 0.], [1., 0., 1.], [0., 0., 1.]],
+        ),
+        (
+            [0.0, 0.0, 1.0],
+            [[1., 0., 1.], [1., 1., 1.], [0., 1., 1.], [0., 0., 1.]],
+        ),
+        (
+            [0.0, 0.0, -1.0],
+            [[0., 0., 0.], [0., 1., 0.], [1., 1., 0.], [1., 0., 0.]],
+        ),
+    ];
+    let mut mesh = Mesh::default();
+    for (normal, corners) in faces {
+        let start = mesh.vertices.len() as u32;
+        for (index, corner) in corners.into_iter().enumerate() {
+            mesh.vertices.push(Vertex {
+                position: Vec3::new(
+                    (center[0] + (corner[0] - 0.5) * half_extent * 2.0) as f32,
+                    (center[1] + (corner[1] - 0.5) * half_extent * 2.0) as f32,
+                    (center[2] + (corner[2] - 0.5) * half_extent * 2.0) as f32,
+                ),
+                normal: Vec3::new(normal[0], normal[1], normal[2]),
+                block,
+                texture: None,
+                uv: [[0.0, 0.0], [0.0, 1.0], [1.0, 1.0], [1.0, 0.0]][index],
+            });
+        }
+        mesh.indices
+            .extend([start, start + 1, start + 2, start, start + 2, start + 3]);
+    }
+    mesh.recalculate_bounds();
+    mesh
+}
+
 /// Meshes exposed block faces. The callback receives signed chunk-local coordinates,
 /// including coordinates just outside the chunk, so callers can hide shared borders.
 pub fn mesh_chunk(chunk: &Chunk, mut is_solid: impl FnMut(i32, i32, i32) -> bool) -> Mesh {
@@ -1147,6 +1205,21 @@ pub struct ProfileSummary {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn entity_cube_mesh_has_six_faces_and_expected_bounds() {
+        let mesh = cube_mesh([3.0, 4.0, 5.0], 0.125, BlockId(2));
+        assert_eq!(mesh.vertices.len(), 24);
+        assert_eq!(mesh.indices.len(), 36);
+        assert_eq!(mesh.triangle_count(), 12);
+        assert_eq!(mesh.bounds_min, Vec3::new(2.875, 3.875, 4.875));
+        assert_eq!(mesh.bounds_max, Vec3::new(3.125, 4.125, 5.125));
+        assert!(mesh
+            .vertices
+            .iter()
+            .all(|vertex| vertex.block == BlockId(2)));
+        assert!(cube_mesh([f64::NAN, 0.0, 0.0], 0.125, BlockId(2)).is_empty());
+    }
 
     #[test]
     fn camera_rejects_invalid_projection_and_builds_view_projection() {

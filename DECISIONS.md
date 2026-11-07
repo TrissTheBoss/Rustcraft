@@ -60,7 +60,7 @@ The first drop subsystem uses a data-driven block-to-item table, stable IDs, bou
 
 ## 2026-11-07 â€” Persist dropped-item entities in save format v4
 
-Save v4 stores bounded dropped-item state alongside the player inventory, and decodes IDs, counts, positions, velocities, age, pickup delay, and allocator state with strict bounds. v1/v2 saves migrate with empty inventory and drops; v3 preserves inventory and adds an empty drop list. Player snapshots now carry drops so backup, copy, and restore paths use the same snapshot contract. Runtime creation, ticking, and rendering are still outstanding.
+Save v4 stores bounded dropped-item state alongside the player inventory, and decodes IDs, counts, positions, velocities, age, pickup delay, and allocator state with strict bounds. v1/v2 saves migrate with empty inventory and drops; v3 preserves inventory and adds an empty drop list. Player snapshots now carry drops so backup, copy, and restore paths use the same snapshot contract. Survival prototype block breaks create mapped loot only after spawn validation succeeds; the fixed simulation tick advances items and inventory pickup, and both scene renderers draw a small block-colored cube per item. If entity capacity or ID allocation is exhausted, the block remains intact. This is a prototype behavior: authoritative loot, mining duration, tools, merge physics, item models, and reference-version verification remain outstanding.
 
 ## 2026-11-07 — Keep world management in the storage boundary
 

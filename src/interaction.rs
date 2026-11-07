@@ -1,10 +1,13 @@
 //! Block targeting and edits for the voxel interaction layer.
 //!
 //! This module contains engine-owned ray and mutation primitives. The current
-//! prototype uses immediate Creative-mode edits; Survival mining, drops,
-//! placement rules, and inventory transactions remain separate requirements.
+//! prototype uses immediate block edits and mapped Survival loot. Survival
+//! mining progression/tool rules, advanced loot, placement rules, and full
+//! inventory UI behavior remain separate requirements.
 
 use crate::blocks::{Aabb, BlockRegistry};
+use crate::drops::{BlockLootTable, DropError, ItemDrops};
+use crate::inventory::ItemCatalog;
 use crate::world::{BlockId, World};
 
 pub const PROTOTYPE_INTERACTION_REACH: f64 = 5.0;
@@ -128,6 +131,29 @@ pub fn break_block(world: &mut World, hit: BlockRayHit) -> Option<BlockId> {
     world.set_block(hit.position.0, BlockId(0))
 }
 
+/// Break a block and create its configured drop as one operation. Spawn
+/// constraints are checked before the world mutates, so a full drop store or
+/// exhausted ID allocator cannot destroy a block while losing its loot.
+pub fn break_block_with_drop(
+    world: &mut World,
+    hit: BlockRayHit,
+    drops: &mut ItemDrops,
+    loot: &BlockLootTable,
+    catalog: &ItemCatalog,
+    drop_position: [f64; 3],
+    pickup_delay_ticks: u16,
+) -> Result<Option<BlockId>, DropError> {
+    let Some(stack) = loot.drop_for(hit.block) else {
+        return Ok(break_block(world, hit));
+    };
+    drops.validate_spawn(stack, drop_position, catalog)?;
+    let Some(broken) = break_block(world, hit) else {
+        return Ok(None);
+    };
+    drops.spawn(stack, drop_position, pickup_delay_ticks, catalog)?;
+    Ok(Some(broken))
+}
+
 /// Place a full-block prototype item against the hit face if its destination
 /// chunk is loaded and the block would not overlap the player's body.
 pub fn place_full_block(
@@ -183,6 +209,8 @@ pub fn place_full_block(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::drops::{ItemDrops, MAX_DROPPED_ITEMS};
+    use crate::inventory::{ItemDefinition, ItemId, ItemKey};
     use crate::world::ChunkPos;
 
     fn world_with_chunks(positions: &[ChunkPos]) -> World {
@@ -342,5 +370,81 @@ mod tests {
                 max: [11.0, 11.0, 11.0],
             },
         ));
+    }
+
+    #[test]
+    fn survival_break_creates_loot_and_capacity_failure_preserves_block() {
+        let mut world = world_with_chunks(&[ChunkPos { x: 0, y: 0, z: 0 }]);
+        world.set_block([2, 1, 1], BlockId(3));
+        let hit = raycast_blocks(
+            &world,
+            &BlockRegistry::new(),
+            [0.5, 1.5, 1.5],
+            [1.0, 0.0, 0.0],
+            5.0,
+        )
+        .unwrap();
+        let mut catalog = ItemCatalog::default();
+        for id in 1..=3 {
+            catalog
+                .register(ItemId(id), ItemDefinition::stackable(64))
+                .unwrap();
+        }
+        let loot = BlockLootTable::prototype();
+        let mut drops = ItemDrops::default();
+        assert_eq!(
+            break_block_with_drop(
+                &mut world,
+                hit,
+                &mut drops,
+                &loot,
+                &catalog,
+                [2.5, 1.5, 1.5],
+                10,
+            ),
+            Ok(Some(BlockId(3)))
+        );
+        assert_eq!(world.block_at([2, 1, 1]), Some(BlockId(0)));
+        let drop = drops.iter().next().unwrap();
+        assert_eq!(drop.stack.key.id, ItemId(3));
+        assert_eq!(drop.position, [2.5, 1.5, 1.5]);
+
+        let mut full_drops = ItemDrops::default();
+        for _ in 0..MAX_DROPPED_ITEMS {
+            full_drops
+                .spawn(
+                    crate::inventory::ItemStack {
+                        key: ItemKey::new(ItemId(1)),
+                        count: 1,
+                    },
+                    [0.5, 5.0, 0.5],
+                    u16::MAX,
+                    &catalog,
+                )
+                .unwrap();
+        }
+        let mut full_world = world_with_chunks(&[ChunkPos { x: 0, y: 0, z: 0 }]);
+        full_world.set_block([2, 1, 1], BlockId(3));
+        let intact_hit = raycast_blocks(
+            &full_world,
+            &BlockRegistry::new(),
+            [0.5, 1.5, 1.5],
+            [1.0, 0.0, 0.0],
+            5.0,
+        )
+        .unwrap();
+        assert_eq!(
+            break_block_with_drop(
+                &mut full_world,
+                intact_hit,
+                &mut full_drops,
+                &loot,
+                &catalog,
+                [2.5, 1.5, 1.5],
+                10,
+            ),
+            Err(DropError::Capacity)
+        );
+        assert_eq!(full_world.block_at([2, 1, 1]), Some(BlockId(3)));
     }
 }

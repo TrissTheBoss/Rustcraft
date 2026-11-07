@@ -9,14 +9,15 @@ use std::time::Instant;
 
 use crate::blocks::Aabb;
 use crate::blocks::BlockRegistry;
-use crate::drops::ItemDrops;
+use crate::drops::{BlockLootTable, ItemDrops, ITEM_PICKUP_DELAY_TICKS};
 #[cfg(windows)]
 use crate::gpu::GpuRenderer;
 use crate::grid::PLAYER_EYE_OFFSET;
 use crate::interaction::{
-    break_block, place_full_block, raycast_blocks, PROTOTYPE_INTERACTION_REACH,
+    break_block, break_block_with_drop, place_full_block, raycast_blocks,
+    PROTOTYPE_INTERACTION_REACH,
 };
-use crate::inventory::Inventory;
+use crate::inventory::{Inventory, ItemCatalog, ItemDefinition, ItemId};
 use crate::logger::Logger;
 use crate::movement::{GameMode, MovementInput, PlayerController};
 use crate::render::{
@@ -249,6 +250,7 @@ static mut WORLD_FORM: Option<WorldCreationForm> = None;
 struct Scene {
     world: crate::world::World,
     meshes: Vec<Mesh>,
+    drop_meshes: Vec<Mesh>,
     mesh_positions: Vec<ChunkPos>,
     materials: MaterialRegistry,
     block_textures: [Option<u16>; 4],
@@ -272,6 +274,8 @@ struct AppState {
     last_physics: Instant,
     selected_block: crate::world::BlockId,
     inventory: Inventory,
+    item_catalog: ItemCatalog,
+    loot_table: BlockLootTable,
     drops: ItemDrops,
     last_jump_press: Option<Instant>,
     jump_was_pressed: bool,
@@ -523,6 +527,51 @@ unsafe extern "system" fn window_proc(
                         while let Some(breaking) = app.pending_block_actions.pop_front() {
                             if let Some(scene) = SCENE.as_mut() {
                                 handle_block_action(app, scene, breaking);
+                            }
+                        }
+                        if !app.drops.is_empty() {
+                            if let Some(scene) = SCENE.as_mut() {
+                                let player_position = [
+                                    app.player.transform.x,
+                                    app.player.transform.y,
+                                    app.player.transform.z,
+                                ];
+                                match app.drops.tick(
+                                    &scene.world,
+                                    player_position,
+                                    &mut app.inventory,
+                                    &app.item_catalog,
+                                    &BlockRegistry::new(),
+                                ) {
+                                    Ok(result) => {
+                                        scene.dirty = true;
+                                        let drop_meshes = build_drop_meshes(&app.drops);
+                                        if drop_meshes != scene.drop_meshes {
+                                            scene.drop_meshes = drop_meshes;
+                                            if let Some(gpu) = app.gpu.as_mut() {
+                                                upload_scene_meshes(gpu, scene);
+                                            }
+                                        }
+                                        if result.picked_up_items > 0 || result.removed_entities > 0
+                                        {
+                                            app.logger.event(
+                                                "INFO",
+                                                "dropped_item_lifecycle",
+                                                format!(
+                                                    "picked_up={} removed={} remaining={}",
+                                                    result.picked_up_items,
+                                                    result.removed_entities,
+                                                    app.drops.len()
+                                                ),
+                                            );
+                                        }
+                                    }
+                                    Err(error) => app.logger.event(
+                                        "WARN",
+                                        "dropped_item_tick_failed",
+                                        error.to_string(),
+                                    ),
+                                }
                             }
                         }
                         if app.last_save.elapsed().as_secs() >= 30 {
@@ -1773,10 +1822,10 @@ unsafe fn activate_world(window: Hwnd, app: &mut AppState, saved: crate::world_s
     app.jump_was_pressed = false;
     app.last_jump_press = None;
     app.last_physics = Instant::now();
-    let scene = build_scene(saved.world);
+    let mut scene = build_scene(saved.world);
+    scene.drop_meshes = build_drop_meshes(&app.drops);
     if let Some(gpu) = app.gpu.as_mut() {
-        let mesh_refs: Vec<&Mesh> = scene.meshes.iter().collect();
-        gpu.upload_meshes(&mesh_refs, &scene.materials);
+        upload_scene_meshes(gpu, &scene);
     } else {
         FRAME = Some(build_frame(
             app.camera,
@@ -1828,7 +1877,8 @@ pub fn run(logger: Option<Logger>) {
         .map(|metadata| metadata.game_mode)
         .unwrap_or(StoredGameMode::Creative);
     let player = player_controller(&initial_player, mode);
-    let scene = build_scene(world);
+    let mut scene = build_scene(world);
+    scene.drop_meshes = build_drop_meshes(&initial_player.drops);
     let width = unsafe { GetSystemMetrics(SM_CXSCREEN) };
     let height = unsafe { GetSystemMetrics(SM_CYSCREEN) };
     unsafe {
@@ -1847,6 +1897,8 @@ pub fn run(logger: Option<Logger>) {
             gpu: None,
             selected_block: initial_player.selected_block,
             inventory: initial_player.inventory,
+            item_catalog: prototype_item_catalog(),
+            loot_table: BlockLootTable::prototype(),
             drops: initial_player.drops.clone(),
             last_jump_press: None,
             jump_was_pressed: false,
@@ -1915,8 +1967,7 @@ pub fn run(logger: Option<Logger>) {
             match GpuRenderer::new(window as isize, width as u32, height as u32) {
                 Ok(mut gpu) => {
                     let scene = SCENE.as_ref().unwrap();
-                    let mesh_refs: Vec<&Mesh> = scene.meshes.iter().collect();
-                    gpu.upload_meshes(&mesh_refs, &scene.materials);
+                    upload_scene_meshes(&mut gpu, scene);
                     app.gpu = Some(gpu);
                     app.logger.event("INFO", "render_backend", "wgpu_textured");
                 }
@@ -1998,11 +2049,49 @@ fn build_scene(world: crate::world::World) -> Scene {
     Scene {
         world,
         meshes,
+        drop_meshes: Vec::new(),
         mesh_positions,
         materials,
         block_textures,
         grass_top_texture: grass_top.or(dirt),
         dirty: false,
+    }
+}
+
+fn prototype_item_catalog() -> ItemCatalog {
+    let mut catalog = ItemCatalog::default();
+    for id in 1..=3 {
+        catalog
+            .register(ItemId(id), ItemDefinition::stackable(64))
+            .expect("prototype item IDs are unique and valid");
+    }
+    catalog
+}
+
+fn upload_scene_meshes(gpu: &mut GpuRenderer, scene: &Scene) {
+    let meshes: Vec<&Mesh> = scene.meshes.iter().chain(&scene.drop_meshes).collect();
+    gpu.upload_meshes(&meshes, &scene.materials);
+}
+
+fn build_drop_meshes(drops: &ItemDrops) -> Vec<Mesh> {
+    let mut combined = Mesh::default();
+    for drop in drops.iter() {
+        let cube = crate::render::cube_mesh(
+            drop.position,
+            0.125,
+            crate::world::BlockId(drop.stack.key.id.0),
+        );
+        let vertex_offset = combined.vertices.len() as u32;
+        combined.vertices.extend(cube.vertices);
+        combined
+            .indices
+            .extend(cube.indices.into_iter().map(|index| index + vertex_offset));
+    }
+    if combined.is_empty() {
+        Vec::new()
+    } else {
+        combined.recalculate_bounds();
+        vec![combined]
     }
 }
 
@@ -2127,7 +2216,29 @@ fn handle_block_action(app: &mut AppState, scene: &mut Scene, breaking: bool) {
         return;
     };
     let position = hit.position.0;
-    let changed = if breaking {
+    let changed = if breaking && app.player.mode == GameMode::Survival {
+        let drop_position = [
+            position[0] as f64 + 0.5,
+            position[1] as f64 + 0.5,
+            position[2] as f64 + 0.5,
+        ];
+        match break_block_with_drop(
+            &mut scene.world,
+            hit,
+            &mut app.drops,
+            &app.loot_table,
+            &app.item_catalog,
+            drop_position,
+            ITEM_PICKUP_DELAY_TICKS,
+        ) {
+            Ok(broken) => broken.is_some(),
+            Err(error) => {
+                app.logger
+                    .event("WARN", "block_break_rejected", error.to_string());
+                false
+            }
+        }
+    } else if breaking {
         break_block(&mut scene.world, hit).is_some()
     } else {
         let player = app.player.transform;
@@ -2145,6 +2256,9 @@ fn handle_block_action(app: &mut AppState, scene: &mut Scene, breaking: bool) {
     };
     if changed {
         scene.dirty = true;
+        if breaking && app.player.mode == GameMode::Survival {
+            scene.drop_meshes = build_drop_meshes(&app.drops);
+        }
         let changed_position = if breaking {
             position
         } else {
@@ -2156,8 +2270,7 @@ fn handle_block_action(app: &mut AppState, scene: &mut Scene, breaking: bool) {
         };
         rebuild_meshes_for_block(scene, changed_position);
         if let Some(gpu) = app.gpu.as_mut() {
-            let mesh_refs: Vec<&Mesh> = scene.meshes.iter().collect();
-            gpu.upload_meshes(&mesh_refs, &scene.materials);
+            upload_scene_meshes(gpu, scene);
         }
     }
     app.logger.event(
@@ -2240,7 +2353,7 @@ fn persist_world(app: &mut AppState, scene: &mut Scene) -> std::io::Result<()> {
 }
 
 fn build_frame(camera: Camera, width: u32, height: u32, scene: &Scene) -> (Vec<u8>, BitmapInfo) {
-    let mesh_refs: Vec<&Mesh> = scene.meshes.iter().collect();
+    let mesh_refs: Vec<&Mesh> = scene.meshes.iter().chain(&scene.drop_meshes).collect();
     let render_width = width * RENDER_SCALE;
     let render_height = height * RENDER_SCALE;
     let frame = CpuRenderer {
