@@ -8,8 +8,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::world::{BlockId, World, CHUNK_VOLUME, MAX_SERIALIZED_CHUNKS};
 
-const SAVE_MAGIC: &[u8; 8] = b"VXSAVE01";
-const SAVE_VERSION: u32 = 1;
+const SAVE_MAGIC_V1: &[u8; 8] = b"VXSAVE01";
+const SAVE_MAGIC_V2: &[u8; 8] = b"VXSAVE02";
+const SAVE_VERSION: u32 = 2;
 const SAVE_FILE: &str = "world.vxs";
 const BACKUP_DIR: &str = "backups";
 const MAX_NAME_BYTES: usize = 128;
@@ -41,6 +42,30 @@ impl TryFrom<u8> for StoredGameMode {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[repr(u8)]
+pub enum StoredDifficulty {
+    Peaceful = 0,
+    Easy = 1,
+    #[default]
+    Normal = 2,
+    Hard = 3,
+}
+
+impl TryFrom<u8> for StoredDifficulty {
+    type Error = io::Error;
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        match value {
+            0 => Ok(Self::Peaceful),
+            1 => Ok(Self::Easy),
+            2 => Ok(Self::Normal),
+            3 => Ok(Self::Hard),
+            _ => Err(invalid_data("invalid saved world difficulty")),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WorldMetadata {
     pub id: String,
@@ -49,6 +74,8 @@ pub struct WorldMetadata {
     pub created_at: u64,
     pub updated_at: u64,
     pub game_mode: StoredGameMode,
+    pub difficulty: StoredDifficulty,
+    pub difficulty_locked: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -158,6 +185,8 @@ impl WorldStore {
             "Creative Prototype".to_owned(),
             0xC0FFEE_1234_5678,
             StoredGameMode::Creative,
+            StoredDifficulty::Normal,
+            false,
             world,
             PlayerSnapshot::default(),
         )
@@ -168,6 +197,27 @@ impl WorldStore {
         name: &str,
         seed: u64,
         game_mode: StoredGameMode,
+        world: World,
+        player: PlayerSnapshot,
+    ) -> io::Result<StoredWorld> {
+        self.create_with_options(
+            name,
+            seed,
+            game_mode,
+            StoredDifficulty::Normal,
+            false,
+            world,
+            player,
+        )
+    }
+
+    pub fn create_with_options(
+        &self,
+        name: &str,
+        seed: u64,
+        game_mode: StoredGameMode,
+        difficulty: StoredDifficulty,
+        difficulty_locked: bool,
         world: World,
         player: PlayerSnapshot,
     ) -> io::Result<StoredWorld> {
@@ -187,6 +237,8 @@ impl WorldStore {
                         created_at: now,
                         updated_at: now,
                         game_mode,
+                        difficulty,
+                        difficulty_locked,
                     };
                     let mut saved = StoredWorld {
                         metadata,
@@ -278,12 +330,42 @@ impl WorldStore {
         Ok(saved)
     }
 
+    pub fn update_options(
+        &self,
+        id: &str,
+        name: &str,
+        seed: u64,
+        game_mode: StoredGameMode,
+        difficulty: StoredDifficulty,
+        difficulty_locked: bool,
+    ) -> io::Result<StoredWorld> {
+        let mut saved = self.load(id)?;
+        if saved.metadata.difficulty_locked
+            && difficulty_locked
+            && saved.metadata.difficulty != difficulty
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "world difficulty is locked",
+            ));
+        }
+        saved.metadata.name = validate_name(name)?;
+        saved.metadata.seed = seed;
+        saved.metadata.game_mode = game_mode;
+        saved.metadata.difficulty = difficulty;
+        saved.metadata.difficulty_locked = difficulty_locked;
+        self.save(&mut saved.metadata, &saved.world, saved.player)?;
+        Ok(saved)
+    }
+
     pub fn copy(&self, id: &str, name: &str) -> io::Result<StoredWorld> {
         let source = self.load(id)?;
-        self.create(
+        self.create_with_options(
             name,
             source.metadata.seed,
             source.metadata.game_mode,
+            source.metadata.difficulty,
+            source.metadata.difficulty_locked,
             source.world,
             source.player,
         )
@@ -377,6 +459,8 @@ impl WorldStore {
         name: String,
         seed: u64,
         game_mode: StoredGameMode,
+        difficulty: StoredDifficulty,
+        difficulty_locked: bool,
         world: World,
         player: PlayerSnapshot,
     ) -> io::Result<StoredWorld> {
@@ -394,6 +478,8 @@ impl WorldStore {
                 created_at: now,
                 updated_at: now,
                 game_mode,
+                difficulty,
+                difficulty_locked,
             },
             world,
             player,
@@ -576,7 +662,7 @@ fn encode_save(
     let world_len = u64::try_from(world_bytes.len())
         .map_err(|_| invalid_input("world payload length is invalid"))?;
     let mut output = Vec::with_capacity(world_bytes.len() + 96 + name.len());
-    output.write_all(SAVE_MAGIC)?;
+    output.write_all(SAVE_MAGIC_V2)?;
     output.write_all(&SAVE_VERSION.to_le_bytes())?;
     output.write_all(&name_len.to_le_bytes())?;
     output.write_all(name)?;
@@ -584,6 +670,8 @@ fn encode_save(
     output.write_all(&metadata.created_at.to_le_bytes())?;
     output.write_all(&metadata.updated_at.to_le_bytes())?;
     output.write_all(&[metadata.game_mode as u8])?;
+    output.write_all(&[metadata.difficulty as u8])?;
+    output.write_all(&[u8::from(metadata.difficulty_locked)])?;
     for value in player.position.into_iter().chain(player.velocity) {
         output.write_all(&value.to_le_bytes())?;
     }
@@ -611,7 +699,7 @@ fn decode_save(bytes: &[u8], id: &str) -> io::Result<StoredWorld> {
         return Err(invalid_data("world save checksum mismatch"));
     }
     let mut input = Cursor::new(&bytes[..payload_len]);
-    let metadata = read_metadata(&mut input, id)?;
+    let (metadata, _) = read_metadata(&mut input, id)?;
     let mut player = PlayerSnapshot::default();
     for axis in 0..3 {
         player.position[axis] = read_f64(&mut input)?;
@@ -665,17 +753,16 @@ fn checksum64(bytes: &[u8]) -> u64 {
     checksum
 }
 
-fn read_metadata<R: Read>(input: &mut R, id: &str) -> io::Result<WorldMetadata> {
+fn read_metadata<R: Read>(input: &mut R, id: &str) -> io::Result<(WorldMetadata, u32)> {
     let mut magic = [0; 8];
     input.read_exact(&mut magic)?;
-    if &magic != SAVE_MAGIC {
-        return Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "unsupported world save signature",
-        ));
-    }
     let version = read_u32(input)?;
-    if version != SAVE_VERSION {
+    let version_matches_magic = match version {
+        1 => &magic == SAVE_MAGIC_V1,
+        2 => &magic == SAVE_MAGIC_V2,
+        _ => false,
+    };
+    if !version_matches_magic {
         return Err(io::Error::new(
             io::ErrorKind::Unsupported,
             "unsupported world save version",
@@ -694,14 +781,30 @@ fn read_metadata<R: Read>(input: &mut R, id: &str) -> io::Result<WorldMetadata> 
     let updated_at = read_u64(input)?;
     let mut game_mode = [0];
     input.read_exact(&mut game_mode)?;
-    Ok(WorldMetadata {
-        id: id.to_owned(),
-        name,
-        seed,
-        created_at,
-        updated_at,
-        game_mode: StoredGameMode::try_from(game_mode[0])?,
-    })
+    let game_mode = StoredGameMode::try_from(game_mode[0])?;
+    let (difficulty, difficulty_locked) = if version >= 2 {
+        let mut difficulty = [0];
+        input.read_exact(&mut difficulty)?;
+        (
+            StoredDifficulty::try_from(difficulty[0])?,
+            read_bool(input)?,
+        )
+    } else {
+        (StoredDifficulty::Normal, false)
+    };
+    Ok((
+        WorldMetadata {
+            id: id.to_owned(),
+            name,
+            seed,
+            created_at,
+            updated_at,
+            game_mode,
+            difficulty,
+            difficulty_locked,
+        },
+        version,
+    ))
 }
 
 fn read_bounded(path: &Path) -> io::Result<Vec<u8>> {
@@ -946,6 +1049,46 @@ mod tests {
         world
     }
 
+    fn encode_v1_fixture(
+        metadata: &WorldMetadata,
+        player: PlayerSnapshot,
+        world_bytes: &[u8],
+    ) -> Vec<u8> {
+        let mut output = Vec::new();
+        output.write_all(SAVE_MAGIC_V1).unwrap();
+        output.write_all(&1u32.to_le_bytes()).unwrap();
+        output
+            .write_all(&(metadata.name.len() as u16).to_le_bytes())
+            .unwrap();
+        output.write_all(metadata.name.as_bytes()).unwrap();
+        output.write_all(&metadata.seed.to_le_bytes()).unwrap();
+        output
+            .write_all(&metadata.created_at.to_le_bytes())
+            .unwrap();
+        output
+            .write_all(&metadata.updated_at.to_le_bytes())
+            .unwrap();
+        output.write_all(&[metadata.game_mode as u8]).unwrap();
+        for value in player.position.into_iter().chain(player.velocity) {
+            output.write_all(&value.to_le_bytes()).unwrap();
+        }
+        output.write_all(&player.yaw.to_le_bytes()).unwrap();
+        output.write_all(&player.pitch.to_le_bytes()).unwrap();
+        output
+            .write_all(&[u8::from(player.flying), u8::from(player.grounded)])
+            .unwrap();
+        output
+            .write_all(&player.selected_block.0.to_le_bytes())
+            .unwrap();
+        output
+            .write_all(&(world_bytes.len() as u64).to_le_bytes())
+            .unwrap();
+        output.write_all(world_bytes).unwrap();
+        let checksum = checksum64(&output);
+        output.write_all(&checksum.to_le_bytes()).unwrap();
+        output
+    }
+
     #[test]
     fn create_save_load_round_trips_world_and_player_state() {
         let root = TestRoot::new();
@@ -980,6 +1123,103 @@ mod tests {
         assert_eq!(loaded.player, player);
         assert_eq!(loaded.world.block_at([-1, 3, 32]), Some(BlockId(2)));
         assert_eq!(store.list().unwrap()[0].health, WorldHealth::Ready);
+    }
+
+    #[test]
+    fn difficulty_and_lock_options_round_trip_and_edit_with_a_backup() {
+        let root = TestRoot::new();
+        let store = WorldStore::new(&root.0);
+        let created = store
+            .create_with_options(
+                "Options Test",
+                55,
+                StoredGameMode::Survival,
+                StoredDifficulty::Easy,
+                false,
+                test_world(),
+                PlayerSnapshot::default(),
+            )
+            .unwrap();
+        assert_eq!(created.metadata.difficulty, StoredDifficulty::Easy);
+        assert!(!created.metadata.difficulty_locked);
+
+        let updated = store
+            .update_options(
+                &created.metadata.id,
+                "Options Updated",
+                77,
+                StoredGameMode::Creative,
+                StoredDifficulty::Hard,
+                true,
+            )
+            .unwrap();
+        assert_eq!(updated.metadata.name, "Options Updated");
+        assert_eq!(updated.metadata.seed, 77);
+        assert_eq!(updated.metadata.game_mode, StoredGameMode::Creative);
+        assert_eq!(updated.metadata.difficulty, StoredDifficulty::Hard);
+        assert!(updated.metadata.difficulty_locked);
+        assert_eq!(updated.world, created.world);
+        assert_eq!(updated.player, created.player);
+        assert_eq!(store.list_backups(&created.metadata.id).unwrap().len(), 1);
+        assert_eq!(store.load(&created.metadata.id).unwrap(), updated);
+        assert_eq!(
+            store
+                .update_options(
+                    &created.metadata.id,
+                    "Blocked Change",
+                    77,
+                    StoredGameMode::Creative,
+                    StoredDifficulty::Easy,
+                    true,
+                )
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::PermissionDenied
+        );
+        let unlocked = store
+            .update_options(
+                &created.metadata.id,
+                "Unlocked",
+                77,
+                StoredGameMode::Creative,
+                StoredDifficulty::Easy,
+                false,
+            )
+            .unwrap();
+        assert_eq!(unlocked.metadata.difficulty, StoredDifficulty::Easy);
+        assert!(!unlocked.metadata.difficulty_locked);
+    }
+
+    #[test]
+    fn version_one_worlds_load_with_defaults_and_upgrade_on_next_save() {
+        let root = TestRoot::new();
+        let store = WorldStore::new(&root.0);
+        let created = store
+            .create(
+                "Legacy World",
+                23,
+                StoredGameMode::Creative,
+                test_world(),
+                PlayerSnapshot::default(),
+            )
+            .unwrap();
+        let mut world_bytes = Vec::new();
+        created.world.save(&mut world_bytes).unwrap();
+        let legacy = encode_v1_fixture(&created.metadata, created.player, &world_bytes);
+        let save_path = store.save_path(&created.metadata.id).unwrap();
+        atomic_write(&save_path, &legacy).unwrap();
+
+        let mut loaded = store.load(&created.metadata.id).unwrap();
+        assert_eq!(loaded.metadata.difficulty, StoredDifficulty::Normal);
+        assert!(!loaded.metadata.difficulty_locked);
+        store
+            .save(&mut loaded.metadata, &loaded.world, loaded.player)
+            .unwrap();
+
+        let upgraded = read_bounded(&save_path).unwrap();
+        assert_eq!(&upgraded[..8], SAVE_MAGIC_V2);
+        assert_eq!(u32::from_le_bytes(upgraded[8..12].try_into().unwrap()), 2);
+        assert_eq!(store.load(&created.metadata.id).unwrap(), loaded);
     }
 
     #[test]

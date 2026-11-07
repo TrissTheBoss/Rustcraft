@@ -23,7 +23,9 @@ use crate::render::{
 };
 use crate::terrain::{TerrainGenerator, ROCK, SOIL, SURFACE};
 use crate::world::{ChunkPos, CHUNK_SIZE};
-use crate::world_store::{PlayerSnapshot, StoredGameMode, WorldMetadata, WorldStore};
+use crate::world_store::{
+    PlayerSnapshot, StoredDifficulty, StoredGameMode, StoredWorld, WorldMetadata, WorldStore,
+};
 
 type Hinstance = *mut c_void;
 type Hwnd = *mut c_void;
@@ -53,6 +55,7 @@ const MENU_SAVE_WORLD: usize = 1001;
 const MENU_CREATE_WORLD: usize = 1002;
 const MENU_QUIT: usize = 1003;
 const MENU_WORLD_BASE: usize = 2000;
+const MENU_EDIT_WORLD_BASE: usize = 2500;
 const MENU_COPY_WORLD_BASE: usize = 3000;
 const MENU_DELETE_WORLD_BASE: usize = 4000;
 const MENU_RESTORE_BACKUP_BASE: usize = 5000;
@@ -63,12 +66,18 @@ const FORM_WORLD_MODE: usize = 1103;
 const FORM_WORLD_ERROR: usize = 1104;
 const FORM_WORLD_CREATE: usize = 1105;
 const FORM_WORLD_CANCEL: usize = 1106;
+const FORM_WORLD_DIFFICULTY: usize = 1107;
+const FORM_WORLD_DIFFICULTY_LOCKED: usize = 1108;
 const DIALOG_IDOK: usize = 1;
 const DIALOG_IDCANCEL: usize = 2;
 const CB_ADDSTRING: u32 = 0x0143;
 const CB_SETCURSEL: u32 = 0x014E;
 const CB_GETCURSEL: u32 = 0x0147;
 const EM_SETLIMITTEXT: u32 = 0x00C5;
+const BM_GETCHECK: u32 = 0x00F0;
+const BM_SETCHECK: u32 = 0x00F1;
+const BS_AUTOCHECKBOX: u32 = 0x0003;
+const BST_CHECKED: isize = 1;
 const WS_CHILD: u32 = 0x4000_0000;
 const WS_VISIBLE: u32 = 0x1000_0000;
 const WS_TABSTOP: u32 = 0x0001_0000;
@@ -190,6 +199,7 @@ extern "system" {
     fn GetWindowTextW(window: Hwnd, text: *mut u16, max_chars: i32) -> i32;
     fn SetFocus(window: Hwnd) -> Hwnd;
     fn IsDialogMessageW(window: Hwnd, message: *const Message) -> i32;
+    fn EnableWindow(window: Hwnd, enable: i32) -> i32;
     fn DrawMenuBar(window: Hwnd) -> i32;
     fn DestroyWindow(window: Hwnd) -> i32;
     fn ClipCursor(rect: *const Rect) -> i32;
@@ -273,9 +283,12 @@ struct AppState {
 
 struct WorldCreationForm {
     controls: Vec<Hwnd>,
+    world_id: Option<String>,
     name_edit: Hwnd,
     seed_edit: Hwnd,
     mode_combo: Hwnd,
+    difficulty_combo: Hwnd,
+    difficulty_locked: Hwnd,
     error_label: Hwnd,
 }
 
@@ -314,6 +327,13 @@ unsafe extern "system" fn window_proc(
                 submit_world_creation_form(window);
                 return 0;
             }
+            if WORLD_FORM.is_some() && command == FORM_WORLD_DIFFICULTY_LOCKED {
+                if let Some(form) = WORLD_FORM.as_ref() {
+                    let checked = SendMessageW(form.difficulty_locked, BM_GETCHECK, 0, 0);
+                    EnableWindow(form.difficulty_combo, (checked != BST_CHECKED) as i32);
+                }
+                return 0;
+            }
             if command == MENU_CREATE_WORLD {
                 open_world_creation_form(window);
                 return 0;
@@ -337,6 +357,16 @@ unsafe extern "system" fn window_proc(
                     .and_then(|app| app.menu_world_ids.get(index).cloned())
                 {
                     delete_world_from_menu(window, &id);
+                }
+                return 0;
+            }
+            if (MENU_EDIT_WORLD_BASE..MENU_EDIT_WORLD_BASE + 500).contains(&command) {
+                let index = command - MENU_EDIT_WORLD_BASE;
+                if let Some(id) = APP
+                    .as_ref()
+                    .and_then(|app| app.menu_world_ids.get(index).cloned())
+                {
+                    open_world_edit_form(window, &id);
                 }
                 return 0;
             }
@@ -803,6 +833,7 @@ unsafe fn build_main_menu(app: &mut AppState) -> *mut c_void {
                     }
                     let can_open = summary.health == crate::world_store::WorldHealth::Ready;
                     let open = wide("Open");
+                    let edit = wide("Edit Options...");
                     let copy = wide("Copy");
                     let delete = wide("Delete...");
                     AppendMenuW(
@@ -810,6 +841,12 @@ unsafe fn build_main_menu(app: &mut AppState) -> *mut c_void {
                         MF_STRING | if can_open { 0 } else { MF_GRAYED },
                         MENU_WORLD_BASE + index,
                         open.as_ptr(),
+                    );
+                    AppendMenuW(
+                        world_menu,
+                        MF_STRING | if can_open { 0 } else { MF_GRAYED },
+                        MENU_EDIT_WORLD_BASE + index,
+                        edit.as_ptr(),
                     );
                     AppendMenuW(
                         world_menu,
@@ -980,6 +1017,49 @@ unsafe fn open_world_creation_form(window: Hwnd) {
             return;
         }
     };
+    build_world_form(window, None, name);
+}
+
+#[allow(static_mut_refs)]
+unsafe fn open_world_edit_form(window: Hwnd, id: &str) {
+    if WORLD_FORM.is_some() {
+        return;
+    }
+    let Some(store) = APP.as_ref().and_then(|app| app.world_store.clone()) else {
+        return;
+    };
+    match store.load(id) {
+        Ok(world) => build_world_form(window, Some(world), String::new()),
+        Err(error) => {
+            if let Some(app) = APP.as_ref() {
+                app.logger
+                    .event("ERROR", "world_edit_load_failed", error.to_string());
+            }
+        }
+    }
+}
+
+#[allow(static_mut_refs)]
+unsafe fn build_world_form(window: Hwnd, world: Option<StoredWorld>, new_name: String) {
+    let editing = world.is_some();
+    let (world_id, name, seed_text, mode, difficulty, difficulty_locked) = match world {
+        Some(world) => (
+            Some(world.metadata.id),
+            world.metadata.name,
+            world.metadata.seed.to_string(),
+            world.metadata.game_mode,
+            world.metadata.difficulty,
+            world.metadata.difficulty_locked,
+        ),
+        None => (
+            None,
+            new_name,
+            String::new(),
+            StoredGameMode::Creative,
+            StoredDifficulty::Normal,
+            false,
+        ),
+    };
     let mut client = Rect {
         left: 0,
         top: 0,
@@ -988,10 +1068,21 @@ unsafe fn open_world_creation_form(window: Hwnd) {
     };
     GetClientRect(window, &mut client);
     let left = ((client.right - 460) / 2).max(12);
-    let top = ((client.bottom - 360) / 2).max(12);
-    let panel = create_form_control(window, "STATIC", "", SS_WHITERECT, left, top, 460, 360, 0);
+    let top = ((client.bottom - 470) / 2).max(12);
+    let panel = create_form_control(window, "STATIC", "", SS_WHITERECT, left, top, 460, 470, 0);
     let mut controls = vec![panel];
-    add_form_label(window, &mut controls, "Create World", left, top, 18);
+    add_form_label(
+        window,
+        &mut controls,
+        if editing {
+            "Edit World Options"
+        } else {
+            "Create World"
+        },
+        left,
+        top,
+        18,
+    );
     add_form_label(window, &mut controls, "World name", left, top, 52);
     let name_edit = create_form_control(
         window,
@@ -1017,7 +1108,7 @@ unsafe fn open_world_creation_form(window: Hwnd) {
     let seed_edit = create_form_control(
         window,
         "EDIT",
-        "",
+        &seed_text,
         ES_AUTOHSCROLL | WS_TABSTOP,
         left + 24,
         top + 134,
@@ -1042,18 +1133,79 @@ unsafe fn open_world_creation_form(window: Hwnd) {
     controls.push(mode_combo);
     let survival = wide("Survival");
     let creative = wide("Creative");
+    let adventure = wide("Adventure");
     let spectator = wide("Spectator");
     SendMessageW(mode_combo, CB_ADDSTRING, 0, survival.as_ptr() as isize);
     SendMessageW(mode_combo, CB_ADDSTRING, 0, creative.as_ptr() as isize);
+    SendMessageW(mode_combo, CB_ADDSTRING, 0, adventure.as_ptr() as isize);
     SendMessageW(mode_combo, CB_ADDSTRING, 0, spectator.as_ptr() as isize);
-    SendMessageW(mode_combo, CB_SETCURSEL, 1, 0);
+    SendMessageW(
+        mode_combo,
+        CB_SETCURSEL,
+        match mode {
+            StoredGameMode::Survival => 0,
+            StoredGameMode::Creative => 1,
+            StoredGameMode::Adventure => 2,
+            StoredGameMode::Spectator => 3,
+        },
+        0,
+    );
+    add_form_label(window, &mut controls, "Difficulty", left, top, 229);
+    let difficulty_combo = create_form_control(
+        window,
+        "COMBOBOX",
+        "",
+        CBS_DROPDOWNLIST | WS_TABSTOP,
+        left + 24,
+        top + 252,
+        412,
+        120,
+        FORM_WORLD_DIFFICULTY,
+    );
+    controls.push(difficulty_combo);
+    for option in ["Peaceful", "Easy", "Normal", "Hard"] {
+        let option = wide(option);
+        SendMessageW(difficulty_combo, CB_ADDSTRING, 0, option.as_ptr() as isize);
+    }
+    SendMessageW(
+        difficulty_combo,
+        CB_SETCURSEL,
+        match difficulty {
+            StoredDifficulty::Peaceful => 0,
+            StoredDifficulty::Easy => 1,
+            StoredDifficulty::Normal => 2,
+            StoredDifficulty::Hard => 3,
+        },
+        0,
+    );
+    let locked_label = if editing {
+        "Lock Difficulty"
+    } else {
+        "Lock Difficulty"
+    };
+    let difficulty_lock = create_form_control(
+        window,
+        "BUTTON",
+        locked_label,
+        BS_AUTOCHECKBOX | WS_TABSTOP,
+        left + 24,
+        top + 291,
+        412,
+        24,
+        FORM_WORLD_DIFFICULTY_LOCKED,
+    );
+    controls.push(difficulty_lock);
+    if difficulty_locked {
+        SendMessageW(difficulty_lock, BM_SETCHECK, BST_CHECKED as usize, 0);
+        EnableWindow(difficulty_combo, 0);
+    }
     add_form_label(
         window,
         &mut controls,
-        "Prototype: gameplay and mode rules are still incomplete.",
+        "Options are saved as world metadata. Changing a seed does not regenerate terrain.",
         left,
         top,
-        229,
+        326,
     );
     let error_label = create_form_control(
         window,
@@ -1061,7 +1213,7 @@ unsafe fn open_world_creation_form(window: Hwnd) {
         "",
         0,
         left + 24,
-        top + 254,
+        top + 352,
         412,
         22,
         FORM_WORLD_ERROR,
@@ -1073,7 +1225,7 @@ unsafe fn open_world_creation_form(window: Hwnd) {
         "Cancel",
         BS_PUSHBUTTON | WS_TABSTOP,
         left + 224,
-        top + 300,
+        top + 410,
         100,
         30,
         FORM_WORLD_CANCEL,
@@ -1082,10 +1234,14 @@ unsafe fn open_world_creation_form(window: Hwnd) {
     let create = create_form_control(
         window,
         "BUTTON",
-        "Create World",
+        if editing {
+            "Save Options"
+        } else {
+            "Create World"
+        },
         BS_DEFPUSHBUTTON | WS_TABSTOP,
         left + 336,
-        top + 300,
+        top + 410,
         100,
         30,
         FORM_WORLD_CREATE,
@@ -1107,9 +1263,12 @@ unsafe fn open_world_creation_form(window: Hwnd) {
     }
     WORLD_FORM = Some(WorldCreationForm {
         controls,
+        world_id,
         name_edit,
         seed_edit,
         mode_combo,
+        difficulty_combo,
+        difficulty_locked: difficulty_lock,
         error_label,
     });
     if let Some(app) = APP.as_mut() {
@@ -1193,17 +1352,34 @@ unsafe fn destroy_world_creation_form() {
 
 #[allow(static_mut_refs)]
 unsafe fn submit_world_creation_form(window: Hwnd) {
-    let Some((name_edit, seed_edit, mode_combo, error_label)) = WORLD_FORM.as_ref().map(|form| {
+    let Some((
+        world_id,
+        name_edit,
+        seed_edit,
+        mode_combo,
+        difficulty_combo,
+        difficulty_locked,
+        error_label,
+    )) = WORLD_FORM.as_ref().map(|form| {
         (
+            form.world_id.clone(),
             form.name_edit,
             form.seed_edit,
             form.mode_combo,
+            form.difficulty_combo,
+            form.difficulty_locked,
             form.error_label,
         )
-    }) else {
+    })
+    else {
         return;
     };
     let name = form_control_text(name_edit);
+    if name.trim().is_empty() {
+        let error = wide("World name cannot be empty.");
+        SetWindowTextW(error_label, error.as_ptr());
+        return;
+    }
     let seed = match optional_seed(&form_control_text(seed_edit)) {
         Ok(seed) => seed,
         Err(()) => {
@@ -1216,13 +1392,27 @@ unsafe fn submit_world_creation_form(window: Hwnd) {
     let mode = match selected_mode {
         0 => StoredGameMode::Survival,
         1 => StoredGameMode::Creative,
-        2 => StoredGameMode::Spectator,
+        2 => StoredGameMode::Adventure,
+        3 => StoredGameMode::Spectator,
         _ => {
             let error = wide("Choose a supported game mode.");
             SetWindowTextW(error_label, error.as_ptr());
             return;
         }
     };
+    let selected_difficulty = SendMessageW(difficulty_combo, CB_GETCURSEL, 0, 0);
+    let difficulty = match selected_difficulty {
+        0 => StoredDifficulty::Peaceful,
+        1 => StoredDifficulty::Easy,
+        2 => StoredDifficulty::Normal,
+        3 => StoredDifficulty::Hard,
+        _ => {
+            let error = wide("Choose a supported difficulty.");
+            SetWindowTextW(error_label, error.as_ptr());
+            return;
+        }
+    };
+    let is_locked = SendMessageW(difficulty_locked, BM_GETCHECK, 0, 0) == BST_CHECKED;
     let Some(app) = APP.as_mut() else {
         return;
     };
@@ -1231,26 +1421,76 @@ unsafe fn submit_world_creation_form(window: Hwnd) {
         SetWindowTextW(error_label, error.as_ptr());
         return;
     };
-    if let Some(scene) = SCENE.as_mut() {
-        if scene.dirty {
-            if let Err(save_error) = persist_world(app, scene) {
-                app.logger.event(
-                    "ERROR",
-                    "world_create_blocked_by_save_failure",
-                    save_error.to_string(),
-                );
-                let error = wide("The current world could not be saved. Creation was cancelled.");
-                SetWindowTextW(error_label, error.as_ptr());
-                return;
+    if world_id.is_none()
+        || app
+            .world_metadata
+            .as_ref()
+            .is_some_and(|active| world_id.as_deref() == Some(active.id.as_str()))
+    {
+        if let Some(scene) = SCENE.as_mut() {
+            if scene.dirty {
+                if let Err(save_error) = persist_world(app, scene) {
+                    app.logger.event(
+                        "ERROR",
+                        "world_options_blocked_by_save_failure",
+                        save_error.to_string(),
+                    );
+                    let error =
+                        wide("The current world could not be saved. Options were not changed.");
+                    SetWindowTextW(error_label, error.as_ptr());
+                    return;
+                }
             }
         }
+    }
+    if let Some(id) = world_id {
+        match store.update_options(&id, &name, seed, mode, difficulty, is_locked) {
+            Ok(updated) => {
+                app.logger.event(
+                    "INFO",
+                    "world_options_updated",
+                    format!(
+                        "id={} mode={mode:?} difficulty={difficulty:?} locked={is_locked}",
+                        updated.metadata.id
+                    ),
+                );
+                destroy_world_creation_form();
+                app.dialog_open = false;
+                app.input.clear();
+                app.last_physics = Instant::now();
+                if app
+                    .world_metadata
+                    .as_ref()
+                    .is_some_and(|active| active.id == id)
+                {
+                    activate_world(window, app, updated);
+                } else {
+                    install_main_menu(window, app);
+                }
+            }
+            Err(error) => {
+                app.logger
+                    .event("ERROR", "world_options_update_failed", error.to_string());
+                let error = wide(&error.to_string());
+                SetWindowTextW(error_label, error.as_ptr());
+            }
+        }
+        return;
     }
     let generator = TerrainGenerator {
         seed,
         ..TerrainGenerator::default()
     };
     let world = generator.generate_region(2);
-    match store.create(&name, seed, mode, world, PlayerSnapshot::default()) {
+    match store.create_with_options(
+        &name,
+        seed,
+        mode,
+        difficulty,
+        is_locked,
+        world,
+        PlayerSnapshot::default(),
+    ) {
         Ok(created) => {
             app.logger.event(
                 "INFO",
