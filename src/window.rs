@@ -28,7 +28,7 @@ use crate::render::{
     greedy_mesh_chunk, load_png, Camera, CpuRenderer, DirectionalLight, InputKey, InputState,
     Material, MaterialRegistry, Mesh, Renderer, Vec3,
 };
-use crate::settings::{Settings, SettingsStore};
+use crate::settings::{BindingAction, KeyBindingError, KeyBindings, Settings, SettingsStore};
 use crate::terrain::{TerrainGenerator, ROCK, SOIL, SURFACE};
 use crate::world::{ChunkPos, CHUNK_SIZE};
 use crate::world_store::{
@@ -92,6 +92,7 @@ const OPTIONS_INVERT_ID: usize = OPTIONS_SENSITIVITY_ID + 1;
 const OPTIONS_APPLY_ID: usize = OPTIONS_INVERT_ID + 1;
 const OPTIONS_DEFAULTS_ID: usize = OPTIONS_APPLY_ID + 1;
 const OPTIONS_BACK_ID: usize = OPTIONS_DEFAULTS_ID + 1;
+const OPTIONS_BINDING_ID_BASE: usize = 8120;
 const CB_ADDSTRING: u32 = 0x0143;
 const CB_SETCURSEL: u32 = 0x014E;
 const CB_GETCURSEL: u32 = 0x0147;
@@ -353,6 +354,10 @@ struct OptionsForm {
     sensitivity_edit: Hwnd,
     invert_mouse_y_check: Hwnd,
     status_label: Hwnd,
+    binding_buttons: Vec<(BindingAction, Hwnd)>,
+    key_bindings: KeyBindings,
+    capture_action: Option<BindingAction>,
+    escape_canceled_down: bool,
     return_to_capture: bool,
 }
 
@@ -816,6 +821,27 @@ unsafe extern "system" fn window_proc(
                 return 0;
             }
             if OPTIONS_FORM.is_some() {
+                if OPTIONS_FORM
+                    .as_ref()
+                    .is_some_and(|form| form.escape_canceled_down)
+                {
+                    if wparam as u32 == VK_ESCAPE && message == WM_KEYUP {
+                        if let Some(form) = OPTIONS_FORM.as_mut() {
+                            form.escape_canceled_down = false;
+                        }
+                    }
+                    return 0;
+                }
+                if let Some(action) = OPTIONS_FORM.as_ref().and_then(|form| form.capture_action) {
+                    if message == WM_KEYDOWN && is_initial_keydown(lparam) {
+                        if wparam as u32 == VK_ESCAPE {
+                            cancel_options_binding_capture(window);
+                        } else {
+                            capture_options_binding(window, action, wparam as u16);
+                        }
+                    }
+                    return 0;
+                }
                 if wparam as u32 == VK_ESCAPE && message == WM_KEYDOWN && is_initial_keydown(lparam)
                 {
                     close_options_form(window);
@@ -840,7 +866,8 @@ unsafe extern "system" fn window_proc(
                 return 0;
             }
             if let Some(app) = APP.as_mut() {
-                if let Some(key) = key_for(wparam as u32) {
+                let mapped_keys = key_for(wparam as u32, app.settings.key_bindings);
+                for key in mapped_keys.iter().copied() {
                     if key == InputKey::Up && message == WM_KEYDOWN && !app.jump_was_pressed {
                         let now = Instant::now();
                         if app
@@ -858,6 +885,8 @@ unsafe extern "system" fn window_proc(
                     if key == InputKey::Up && message == WM_KEYUP {
                         app.jump_was_pressed = false;
                     }
+                }
+                if !mapped_keys.is_empty() {
                     app.logger.event(
                         "TRACE",
                         "key_event",
@@ -964,16 +993,39 @@ unsafe extern "system" fn window_proc(
     }
 }
 
-fn key_for(key: u32) -> Option<InputKey> {
+fn key_for(key: u32, bindings: KeyBindings) -> Vec<InputKey> {
+    let Ok(key) = u16::try_from(key) else {
+        return Vec::new();
+    };
+    bindings
+        .actions(key)
+        .into_iter()
+        .map(|action| match action {
+            BindingAction::Forward => InputKey::Forward,
+            BindingAction::Backward => InputKey::Backward,
+            BindingAction::Left => InputKey::Left,
+            BindingAction::Right => InputKey::Right,
+            BindingAction::Jump => InputKey::Up,
+            BindingAction::Sneak => InputKey::Down,
+            BindingAction::Sprint => InputKey::Sprint,
+        })
+        .collect()
+}
+
+fn key_label(key: u16) -> String {
     match key {
-        0x57 => Some(InputKey::Forward),
-        0x53 => Some(InputKey::Backward),
-        0x41 => Some(InputKey::Left),
-        0x44 => Some(InputKey::Right),
-        0x20 => Some(InputKey::Up),
-        0x11 => Some(InputKey::Down),
-        0x10 => Some(InputKey::Sprint),
-        _ => None,
+        0x10 => "Shift".to_owned(),
+        0x11 => "Ctrl".to_owned(),
+        0x20 => "Space".to_owned(),
+        0x09 => "Tab".to_owned(),
+        0x0d => "Enter".to_owned(),
+        0x25 => "Left Arrow".to_owned(),
+        0x26 => "Up Arrow".to_owned(),
+        0x27 => "Right Arrow".to_owned(),
+        0x28 => "Down Arrow".to_owned(),
+        0x30..=0x39 | 0x41..=0x5a => (key as u8 as char).to_string(),
+        0x70..=0x87 => format!("F{}", key - 0x6f),
+        _ => format!("Key 0x{key:02X}"),
     }
 }
 
@@ -1543,10 +1595,11 @@ unsafe fn open_options_form(window: Hwnd) {
         bottom: 0,
     };
     GetClientRect(window, &mut client);
-    let width = 460;
-    let height = 330;
+    let width = 520;
+    let height = 560;
     let left = ((client.right - width) / 2).max(12);
     let top = ((client.bottom - height) / 2).max(12);
+    let current_settings = APP.as_ref().map(|app| app.settings).unwrap_or_default();
     let mut controls = Vec::new();
     controls.push(create_form_control(
         window,
@@ -1629,22 +1682,61 @@ unsafe fn open_options_form(window: Hwnd) {
     let status_label = create_form_control(
         window,
         "STATIC",
-        "These project settings are not yet verified against Java Edition 26.3.",
+        "Project settings are not yet verified against Java Edition 26.3.",
         0,
         left + 24,
-        top + 210,
+        top + 456,
         width - 48,
-        34,
+        38,
         0,
     );
     controls.push(status_label);
+    controls.push(create_form_control(
+        window,
+        "STATIC",
+        "Click a movement action, then press a key. Escape cancels binding.",
+        0,
+        left + 24,
+        top + 190,
+        width - 48,
+        22,
+        0,
+    ));
+    let mut binding_buttons = Vec::with_capacity(BindingAction::ALL.len());
+    for (index, action) in BindingAction::ALL.into_iter().enumerate() {
+        let row_y = top + 216 + index as i32 * 34;
+        controls.push(create_form_control(
+            window,
+            "STATIC",
+            action.label(),
+            0,
+            left + 24,
+            row_y + 4,
+            240,
+            24,
+            0,
+        ));
+        let button = create_form_control(
+            window,
+            "BUTTON",
+            &key_label(current_settings.key_bindings.key(action)),
+            BS_PUSHBUTTON | WS_TABSTOP,
+            left + 280,
+            row_y,
+            190,
+            28,
+            OPTIONS_BINDING_ID_BASE + index,
+        );
+        binding_buttons.push((action, button));
+        controls.push(button);
+    }
     controls.push(create_form_control(
         window,
         "BUTTON",
         "Use Defaults",
         BS_PUSHBUTTON | WS_TABSTOP,
         left + 24,
-        top + 258,
+        top + 510,
         120,
         34,
         OPTIONS_DEFAULTS_ID,
@@ -1655,7 +1747,7 @@ unsafe fn open_options_form(window: Hwnd) {
         "Apply",
         BS_DEFPUSHBUTTON | WS_TABSTOP,
         left + 160,
-        top + 258,
+        top + 510,
         120,
         34,
         OPTIONS_APPLY_ID,
@@ -1666,7 +1758,7 @@ unsafe fn open_options_form(window: Hwnd) {
         "Back",
         BS_PUSHBUTTON | WS_TABSTOP,
         left + 296,
-        top + 258,
+        top + 510,
         120,
         34,
         OPTIONS_BACK_ID,
@@ -1677,6 +1769,10 @@ unsafe fn open_options_form(window: Hwnd) {
         sensitivity_edit,
         invert_mouse_y_check,
         status_label,
+        binding_buttons,
+        key_bindings: current_settings.key_bindings,
+        capture_action: None,
+        escape_canceled_down: false,
         return_to_capture,
     });
     if !field_of_view_edit.is_null() {
@@ -1699,10 +1795,45 @@ unsafe fn handle_options_command(window: Hwnd, command: usize) -> bool {
                 SetWindowTextW(form.field_of_view_edit, fov.as_ptr());
                 SetWindowTextW(form.sensitivity_edit, sensitivity.as_ptr());
                 SendMessageW(form.invert_mouse_y_check, BM_SETCHECK, 0, 0);
+                form.binding_buttons
+                    .iter()
+                    .zip(BindingAction::ALL)
+                    .for_each(|((_, button), action)| {
+                        let text = wide(&key_label(defaults.key_bindings.key(action)));
+                        SetWindowTextW(*button, text.as_ptr());
+                    });
+                if let Some(form) = OPTIONS_FORM.as_mut() {
+                    form.key_bindings = defaults.key_bindings;
+                    form.capture_action = None;
+                    form.escape_canceled_down = false;
+                }
                 set_options_status("Defaults staged. Select Apply to save them.");
             }
         }
         OPTIONS_APPLY_ID => apply_options_form(window),
+        binding_id
+            if (OPTIONS_BINDING_ID_BASE..OPTIONS_BINDING_ID_BASE + BindingAction::ALL.len())
+                .contains(&binding_id) =>
+        {
+            let index = binding_id - OPTIONS_BINDING_ID_BASE;
+            let action = BindingAction::ALL[index];
+            if let Some(form) = OPTIONS_FORM.as_mut() {
+                form.capture_action = Some(action);
+                if let Some((_, button)) = form
+                    .binding_buttons
+                    .iter()
+                    .find(|(candidate, _)| *candidate == action)
+                {
+                    let text = wide("Press a key (Escape cancels)");
+                    SetWindowTextW(*button, text.as_ptr());
+                }
+            }
+            SetFocus(window);
+            set_options_status(&format!(
+                "Press a key for {}. Escape cancels.",
+                action.label()
+            ));
+        }
         _ => return true,
     }
     true
@@ -1729,6 +1860,7 @@ unsafe fn apply_options_form(window: Hwnd) {
         field_of_view_degrees,
         mouse_sensitivity_permille,
         invert_mouse_y: SendMessageW(form.invert_mouse_y_check, BM_GETCHECK, 0, 0) == BST_CHECKED,
+        key_bindings: form.key_bindings,
     };
     if let Err(error) = settings.validate() {
         let message = match error {
@@ -1737,6 +1869,9 @@ unsafe fn apply_options_form(window: Hwnd) {
             }
             crate::settings::SettingsValidationError::MouseSensitivityOutOfRange => {
                 "Mouse sensitivity must be between 100 and 2000."
+            }
+            crate::settings::SettingsValidationError::InvalidKeyBindings => {
+                "One or more key bindings are invalid. Restore defaults or rebind them."
             }
         };
         set_options_status(message);
@@ -1767,6 +1902,105 @@ unsafe fn set_options_status(message: &str) {
     if let Some(form) = OPTIONS_FORM.as_ref() {
         let text = wide(message);
         SetWindowTextW(form.status_label, text.as_ptr());
+    }
+}
+
+#[allow(static_mut_refs)]
+unsafe fn cancel_options_binding_capture(window: Hwnd) {
+    let Some(form) = OPTIONS_FORM.as_mut() else {
+        return;
+    };
+    if let Some(action) = form.capture_action.take() {
+        if let Some((_, button)) = form
+            .binding_buttons
+            .iter()
+            .find(|(candidate, _)| *candidate == action)
+        {
+            let text = wide(&key_label(form.key_bindings.key(action)));
+            SetWindowTextW(*button, text.as_ptr());
+        }
+    }
+    SetFocus(window);
+    set_options_status("Key binding canceled.");
+}
+
+#[allow(static_mut_refs)]
+unsafe fn capture_options_binding(window: Hwnd, action: BindingAction, key: u16) {
+    let Some(mut bindings) = OPTIONS_FORM.as_ref().map(|form| form.key_bindings) else {
+        return;
+    };
+    let conflicts = bindings.conflicts(action, key);
+    let allow_shared = if conflicts.is_empty() {
+        false
+    } else {
+        let conflict_names = conflicts
+            .iter()
+            .map(|conflict| conflict.label())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let prompt = wide(&format!(
+            "This key is already assigned to {conflict_names}. Assign it to both actions?"
+        ));
+        let caption = wide("Shared Key Binding");
+        MessageBoxW(
+            window,
+            prompt.as_ptr(),
+            caption.as_ptr(),
+            MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2,
+        ) == IDYES
+    };
+
+    let result = bindings.assign(action, key, allow_shared);
+    if let Some(form) = OPTIONS_FORM.as_mut() {
+        form.capture_action = None;
+        form.escape_canceled_down = true;
+        if result.is_ok() {
+            form.key_bindings = bindings;
+        }
+        if let Some((_, button)) = form
+            .binding_buttons
+            .iter()
+            .find(|(candidate, _)| *candidate == action)
+        {
+            let displayed_key = if result.is_ok() {
+                key
+            } else {
+                form.key_bindings.key(action)
+            };
+            let text = wide(&key_label(displayed_key));
+            SetWindowTextW(*button, text.as_ptr());
+        }
+    }
+    SetFocus(window);
+    match result {
+        Ok(()) => {
+            refresh_options_binding_buttons();
+            if allow_shared {
+                set_options_status("Shared binding staged. Select Apply to save it.");
+            } else {
+                set_options_status("Binding staged. Select Apply to save it.");
+            }
+        }
+        Err(KeyBindingError::Conflict) => {
+            set_options_status(
+                "Binding unchanged; use the same key only after confirming the conflict.",
+            );
+        }
+        Err(KeyBindingError::ReservedOrInvalid) => {
+            set_options_status(
+                "That key is reserved by inventory, hotbar, pause, or is unsupported.",
+            );
+        }
+    }
+}
+
+#[allow(static_mut_refs)]
+unsafe fn refresh_options_binding_buttons() {
+    if let Some(form) = OPTIONS_FORM.as_ref() {
+        for (action, button) in &form.binding_buttons {
+            let text = wide(&key_label(form.key_bindings.key(*action)));
+            SetWindowTextW(*button, text.as_ptr());
+        }
     }
 }
 
@@ -2351,9 +2585,11 @@ fn optional_seed(text: &str) -> Result<u64, ()> {
 #[cfg(test)]
 mod world_creation_tests {
     use super::{
-        inventory_slot, is_initial_keydown, optional_seed, player_controller, stored_game_mode,
-        GameMode, InventorySlot, StoredGameMode,
+        inventory_slot, is_initial_keydown, key_for, optional_seed, player_controller,
+        stored_game_mode, GameMode, InventorySlot, StoredGameMode,
     };
+    use crate::render::InputKey;
+    use crate::settings::{BindingAction, KeyBindings};
     use crate::world_store::PlayerSnapshot;
 
     #[test]
@@ -2408,6 +2644,19 @@ mod world_creation_tests {
     fn pause_escape_ignores_repeated_keydown_messages() {
         assert!(is_initial_keydown(0));
         assert!(!is_initial_keydown(0x4000_0000));
+    }
+
+    #[test]
+    fn configured_movement_bindings_drive_all_assigned_actions() {
+        let mut bindings = KeyBindings::default();
+        assert_eq!(key_for(0x57, bindings), vec![InputKey::Forward]);
+        bindings.assign(BindingAction::Forward, 0x41, true).unwrap();
+        assert_eq!(
+            key_for(0x41, bindings),
+            vec![InputKey::Forward, InputKey::Left]
+        );
+        assert!(key_for(0x45, bindings).is_empty());
+        assert!(key_for(0x31, bindings).is_empty());
     }
 }
 
@@ -3000,7 +3249,7 @@ pub fn run(logger: Option<Logger>) {
             match store.load() {
                 Ok(loaded) => {
                     for warning in loaded.warnings {
-                        logger.event("WARN", "settings_value_fallback", warning.to_string());
+                        logger.event("WARN", "settings_load_notice", warning.to_string());
                     }
                     (Some(store), loaded.settings)
                 }
@@ -3161,10 +3410,14 @@ pub fn run(logger: Option<Logger>) {
             private: 0,
         };
         while GetMessageW(&mut message, null_mut(), 0, 0) > 0 {
-            if (WORLD_FORM.is_some()
-                || INVENTORY_FORM.is_some()
-                || PAUSE_FORM.is_some()
-                || OPTIONS_FORM.is_some())
+            let binding_capture_active = OPTIONS_FORM
+                .as_ref()
+                .is_some_and(|form| form.capture_action.is_some() || form.escape_canceled_down);
+            if !binding_capture_active
+                && (WORLD_FORM.is_some()
+                    || INVENTORY_FORM.is_some()
+                    || PAUSE_FORM.is_some()
+                    || OPTIONS_FORM.is_some())
                 && IsDialogMessageW(window, &message) != 0
             {
                 continue;
