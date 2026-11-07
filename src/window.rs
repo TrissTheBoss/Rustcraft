@@ -93,6 +93,11 @@ const INVENTORY_CATALOG_ITEM_COUNT: usize = 10;
 const PAUSE_RESUME_ID: usize = 8100;
 const PAUSE_SAVE_QUIT_ID: usize = PAUSE_RESUME_ID + 1;
 const PAUSE_OPTIONS_ID: usize = PAUSE_SAVE_QUIT_ID + 1;
+const PAUSE_TITLE_ID: usize = PAUSE_OPTIONS_ID + 1;
+const TITLE_SINGLEPLAYER_ID: usize = 9000;
+const TITLE_OPTIONS_ID: usize = TITLE_SINGLEPLAYER_ID + 1;
+const TITLE_QUIT_ID: usize = TITLE_OPTIONS_ID + 1;
+const TITLE_PLAY_ID: usize = TITLE_QUIT_ID + 1;
 const OPTIONS_FOV_ID: usize = 8110;
 const OPTIONS_SENSITIVITY_ID: usize = OPTIONS_FOV_ID + 1;
 const OPTIONS_INVERT_ID: usize = OPTIONS_SENSITIVITY_ID + 1;
@@ -122,6 +127,8 @@ const IDYES: i32 = 6;
 const MB_YESNO: u32 = 0x0004;
 const MB_ICONWARNING: u32 = 0x0030;
 const MB_DEFBUTTON2: u32 = 0x0100;
+const TPM_RIGHTBUTTON: u32 = 0x0002;
+const TPM_RETURNCMD: u32 = 0x0100;
 const TICK_INTERVAL_MS: u32 = 50;
 const VK_ESCAPE: u32 = 0x1B;
 const VK_CONTROL: u32 = 0x11;
@@ -230,6 +237,7 @@ extern "system" {
     fn AppendMenuW(menu: *mut c_void, flags: u32, item: usize, text: *const u16) -> i32;
     fn SetMenu(window: Hwnd, menu: *mut c_void) -> i32;
     fn GetMenu(window: Hwnd) -> *mut c_void;
+    fn GetSubMenu(menu: *mut c_void, position: i32) -> *mut c_void;
     fn DestroyMenu(menu: *mut c_void) -> i32;
     fn PostMessageW(window: Hwnd, message: u32, wparam: Wparam, lparam: Lparam) -> i32;
     fn MessageBoxW(window: Hwnd, text: *const u16, caption: *const u16, flags: u32) -> i32;
@@ -249,6 +257,15 @@ extern "system" {
     fn ClientToScreen(window: Hwnd, point: *mut Point) -> i32;
     fn SetCursorPos(x: i32, y: i32) -> i32;
     fn GetSystemMetrics(index: i32) -> i32;
+    fn TrackPopupMenu(
+        menu: *mut c_void,
+        flags: u32,
+        x: i32,
+        y: i32,
+        reserved: i32,
+        owner: Hwnd,
+        rect: *const Rect,
+    ) -> u32;
 }
 #[link(name = "gdi32")]
 extern "system" {
@@ -283,6 +300,7 @@ static mut FRAME: Option<(Vec<u8>, BitmapInfo)> = None;
 static mut APP: Option<AppState> = None;
 static mut SCENE: Option<Scene> = None;
 static mut WORLD_FORM: Option<WorldCreationForm> = None;
+static mut TITLE_FORM: Option<TitleForm> = None;
 static mut INVENTORY_FORM: Option<InventoryForm> = None;
 static mut PAUSE_FORM: Option<PauseForm> = None;
 static mut OPTIONS_FORM: Option<OptionsForm> = None;
@@ -352,6 +370,11 @@ struct WorldCreationForm {
     error_label: Hwnd,
 }
 
+struct TitleForm {
+    controls: Vec<Hwnd>,
+    status_label: Hwnd,
+}
+
 struct InventoryForm {
     controls: Vec<Hwnd>,
     slot_controls: Vec<Hwnd>,
@@ -384,6 +407,7 @@ struct OptionsForm {
     capture_action: Option<BindingAction>,
     escape_canceled_down: bool,
     return_to_capture: bool,
+    return_to_title: bool,
 }
 
 const MF_STRING: u32 = 0x0000;
@@ -405,6 +429,9 @@ unsafe extern "system" fn window_proc(
     match message {
         WM_COMMAND => {
             let command = wparam & 0xffff;
+            if handle_title_command(window, command) {
+                return 0;
+            }
             if handle_inventory_command(window, command, ((wparam >> 16) & 0xffff) as u16) {
                 return 0;
             }
@@ -518,6 +545,7 @@ unsafe extern "system" fn window_proc(
             0
         }
         WM_CLOSE => {
+            destroy_title_form();
             if INVENTORY_FORM.is_some() {
                 close_inventory_form(window);
                 return 0;
@@ -868,6 +896,9 @@ unsafe extern "system" fn window_proc(
             0
         }
         WM_KEYDOWN | WM_KEYUP => {
+            if TITLE_FORM.is_some() {
+                return 0;
+            }
             if INVENTORY_FORM.is_some() {
                 if wparam as u32 == VK_ESCAPE && message == WM_KEYDOWN {
                     close_inventory_form(window);
@@ -1378,6 +1409,251 @@ unsafe fn install_main_menu(window: Hwnd, app: &mut AppState) {
 }
 
 #[allow(static_mut_refs)]
+unsafe fn open_title_form(window: Hwnd) {
+    if TITLE_FORM.is_some()
+        || WORLD_FORM.is_some()
+        || INVENTORY_FORM.is_some()
+        || PAUSE_FORM.is_some()
+        || OPTIONS_FORM.is_some()
+    {
+        return;
+    }
+    let mut client = Rect {
+        left: 0,
+        top: 0,
+        right: 0,
+        bottom: 0,
+    };
+    GetClientRect(window, &mut client);
+    let width = 440;
+    let height = 380;
+    let left = ((client.right - width) / 2).max(12);
+    let top = ((client.bottom - height) / 2).max(12);
+    let mut controls = Vec::new();
+    controls.push(create_form_control(
+        window,
+        "STATIC",
+        "Voxel Engine",
+        0,
+        left + 32,
+        top + 24,
+        width - 64,
+        38,
+        0,
+    ));
+    let world_name = APP
+        .as_ref()
+        .and_then(|app| app.world_metadata.as_ref())
+        .map(|metadata| metadata.name.as_str())
+        .unwrap_or("No active world");
+    let status_text = format!("Active save: {world_name}. Choose a world or resume play.");
+    let status_label = create_form_control(
+        window,
+        "STATIC",
+        &status_text,
+        0,
+        left + 32,
+        top + 70,
+        width - 64,
+        42,
+        0,
+    );
+    controls.push(status_label);
+    let play = create_form_control(
+        window,
+        "BUTTON",
+        "Resume World",
+        BS_DEFPUSHBUTTON | WS_TABSTOP,
+        left + 32,
+        top + 124,
+        width - 64,
+        38,
+        TITLE_PLAY_ID,
+    );
+    controls.push(play);
+    let singleplayer = create_form_control(
+        window,
+        "BUTTON",
+        "Singleplayer / Worlds...",
+        BS_PUSHBUTTON | WS_TABSTOP,
+        left + 32,
+        top + 170,
+        width - 64,
+        38,
+        TITLE_SINGLEPLAYER_ID,
+    );
+    controls.push(singleplayer);
+    let options = create_form_control(
+        window,
+        "BUTTON",
+        "Options",
+        BS_PUSHBUTTON | WS_TABSTOP,
+        left + 32,
+        top + 216,
+        width - 64,
+        38,
+        TITLE_OPTIONS_ID,
+    );
+    controls.push(options);
+    let quit = create_form_control(
+        window,
+        "BUTTON",
+        "Quit",
+        BS_PUSHBUTTON | WS_TABSTOP,
+        left + 32,
+        top + 262,
+        width - 64,
+        38,
+        TITLE_QUIT_ID,
+    );
+    controls.push(quit);
+    controls.push(create_form_control(
+        window,
+        "STATIC",
+        "Multiplayer, resource packs, and accessibility pages are not implemented yet.",
+        0,
+        left + 32,
+        top + 310,
+        width - 64,
+        48,
+        0,
+    ));
+    if controls.iter().any(|control| control.is_null()) {
+        for control in controls
+            .into_iter()
+            .rev()
+            .filter(|control| !control.is_null())
+        {
+            DestroyWindow(control);
+        }
+        if let Some(app) = APP.as_ref() {
+            app.logger.event(
+                "ERROR",
+                "title_form_failed",
+                "a native screen control failed",
+            );
+        }
+        return;
+    }
+    TITLE_FORM = Some(TitleForm {
+        controls,
+        status_label,
+    });
+    if let Some(app) = APP.as_mut() {
+        app.dialog_open = true;
+        app.input.clear();
+        app.breaking_held = false;
+        app.mining_session.reset();
+        app.last_physics = Instant::now();
+        if app.cursor_locked {
+            app.cursor_locked = false;
+            ClipCursor(null());
+            ShowCursor(1);
+        }
+        app.logger
+            .event("INFO", "title_opened", "source=startup-or-pause");
+    }
+    SetFocus(play);
+    InvalidateRect(window, null(), 0);
+}
+
+#[allow(static_mut_refs)]
+unsafe fn destroy_title_form() {
+    if let Some(form) = TITLE_FORM.take() {
+        for control in form.controls.into_iter().rev() {
+            if !control.is_null() {
+                DestroyWindow(control);
+            }
+        }
+    }
+}
+
+#[allow(static_mut_refs)]
+unsafe fn close_title_form(window: Hwnd, enter_game: bool) {
+    if TITLE_FORM.is_none() {
+        return;
+    }
+    destroy_title_form();
+    if let Some(app) = APP.as_mut() {
+        app.dialog_open = false;
+        app.input.clear();
+        app.last_physics = Instant::now();
+        if enter_game {
+            app.cursor_locked = true;
+            ShowCursor(0);
+            lock_cursor(window);
+        }
+        app.logger.event(
+            "INFO",
+            "title_closed",
+            if enter_game {
+                "action=play"
+            } else {
+                "action=options"
+            },
+        );
+    }
+    if !enter_game {
+        ClipCursor(null());
+    }
+    SetFocus(window);
+    InvalidateRect(window, null(), 0);
+}
+
+#[allow(static_mut_refs)]
+unsafe fn handle_title_command(window: Hwnd, command: usize) -> bool {
+    if TITLE_FORM.is_none() {
+        return false;
+    }
+    match command {
+        TITLE_PLAY_ID => close_title_form(window, true),
+        TITLE_SINGLEPLAYER_ID => {
+            let root = GetMenu(window);
+            let worlds_menu = GetSubMenu(root, 0);
+            if worlds_menu.is_null() {
+                if let Some(form) = TITLE_FORM.as_ref() {
+                    let text = wide("World management is unavailable.");
+                    SetWindowTextW(form.status_label, text.as_ptr());
+                }
+                return true;
+            }
+            let mut button_rect = Rect {
+                left: 0,
+                top: 0,
+                right: 0,
+                bottom: 0,
+            };
+            if let Some(form) = TITLE_FORM.as_ref() {
+                if let Some(button) = form.controls.get(3) {
+                    GetWindowRect(*button, &mut button_rect);
+                }
+            }
+            let selected = TrackPopupMenu(
+                worlds_menu,
+                TPM_RIGHTBUTTON | TPM_RETURNCMD,
+                button_rect.left,
+                button_rect.bottom,
+                0,
+                window,
+                null(),
+            );
+            if selected != 0 {
+                SendMessageW(window, WM_COMMAND, selected as usize, 0);
+            }
+        }
+        TITLE_OPTIONS_ID => {
+            close_title_form(window, false);
+            open_options_form(window, true);
+        }
+        TITLE_QUIT_ID => {
+            PostMessageW(window, WM_CLOSE, 0, 0);
+        }
+        _ => return false,
+    }
+    true
+}
+
+#[allow(static_mut_refs)]
 unsafe fn create_form_control(
     parent: Hwnd,
     class_name: &str,
@@ -1717,7 +1993,7 @@ unsafe fn open_pause_form_with_capture(
     };
     GetClientRect(window, &mut client);
     let width = 360;
-    let height = 264;
+    let height = 300;
     let left = ((client.right - width) / 2).max(12);
     let top = ((client.bottom - height) / 2).max(12);
     let mut controls = Vec::new();
@@ -1778,13 +2054,24 @@ unsafe fn open_pause_form_with_capture(
         34,
         PAUSE_SAVE_QUIT_ID,
     ));
+    controls.push(create_form_control(
+        window,
+        "BUTTON",
+        "Save & Return to Title",
+        BS_PUSHBUTTON | WS_TABSTOP,
+        left + 24,
+        top + 206,
+        width - 48,
+        34,
+        PAUSE_TITLE_ID,
+    ));
     let status_label = create_form_control(
         window,
         "STATIC",
         "",
         0,
         left + 24,
-        top + 206,
+        top + 246,
         width - 48,
         32,
         0,
@@ -1808,11 +2095,42 @@ unsafe fn handle_pause_command(window: Hwnd, command: usize) -> bool {
     }
     match command {
         PAUSE_RESUME_ID | DIALOG_IDCANCEL => close_pause_form(window),
-        PAUSE_OPTIONS_ID => open_options_form(window),
+        PAUSE_OPTIONS_ID => open_options_form(window, false),
         PAUSE_SAVE_QUIT_ID => save_and_quit_from_pause(window),
+        PAUSE_TITLE_ID => save_and_return_to_title(window),
         _ => return true,
     }
     true
+}
+
+#[allow(static_mut_refs)]
+unsafe fn save_and_return_to_title(window: Hwnd) {
+    let result = match (APP.as_mut(), SCENE.as_mut()) {
+        (Some(app), Some(scene)) if scene.dirty => persist_world(app, scene),
+        _ => Ok(()),
+    };
+    if let Err(error) = result {
+        if let Some(form) = PAUSE_FORM.as_ref() {
+            let text = wide(&format!("Could not save world: {error}"));
+            SetWindowTextW(form.status_label, text.as_ptr());
+        }
+        if let Some(app) = APP.as_ref() {
+            app.logger
+                .event("ERROR", "pause_return_title_failed", error.to_string());
+        }
+        return;
+    }
+    destroy_pause_form();
+    if let Some(app) = APP.as_mut() {
+        app.dialog_open = false;
+        app.cursor_locked = false;
+        app.input.clear();
+        app.last_physics = Instant::now();
+        app.logger
+            .event("INFO", "pause_return_title", "world_saved=true");
+    }
+    ClipCursor(null());
+    open_title_form(window);
 }
 
 #[allow(static_mut_refs)]
@@ -1888,14 +2206,18 @@ unsafe fn destroy_pause_form() {
 }
 
 #[allow(static_mut_refs)]
-unsafe fn open_options_form(window: Hwnd) {
-    let return_to_capture = PAUSE_FORM
-        .as_ref()
-        .is_some_and(|form| form.cursor_was_locked);
-    if PAUSE_FORM.is_none() || OPTIONS_FORM.is_some() {
+unsafe fn open_options_form(window: Hwnd, return_to_title: bool) {
+    let return_to_capture = !return_to_title
+        && PAUSE_FORM
+            .as_ref()
+            .is_some_and(|form| form.cursor_was_locked);
+    if (PAUSE_FORM.is_none() && !return_to_title) || OPTIONS_FORM.is_some() || TITLE_FORM.is_some()
+    {
         return;
     }
-    destroy_pause_form();
+    if PAUSE_FORM.is_some() {
+        destroy_pause_form();
+    }
 
     let mut client = Rect {
         left: 0,
@@ -2115,7 +2437,13 @@ unsafe fn open_options_form(window: Hwnd) {
         capture_action: None,
         escape_canceled_down: false,
         return_to_capture,
+        return_to_title,
     });
+    if let Some(app) = APP.as_mut() {
+        app.dialog_open = true;
+        app.input.clear();
+        app.last_physics = Instant::now();
+    }
     if !field_of_view_edit.is_null() {
         SetFocus(field_of_view_edit);
     }
@@ -2364,11 +2692,18 @@ unsafe fn refresh_options_binding_buttons() {
 
 #[allow(static_mut_refs)]
 unsafe fn close_options_form(window: Hwnd) {
+    let return_to_title = OPTIONS_FORM
+        .as_ref()
+        .is_some_and(|form| form.return_to_title);
     let return_to_capture = OPTIONS_FORM
         .as_ref()
         .is_some_and(|form| form.return_to_capture);
     destroy_options_form();
-    open_pause_form_with_capture(window, return_to_capture, false);
+    if return_to_title {
+        open_title_form(window);
+    } else {
+        open_pause_form_with_capture(window, return_to_capture, false);
+    }
 }
 
 #[allow(static_mut_refs)]
@@ -3135,7 +3470,7 @@ mod world_creation_tests {
 unsafe fn close_world_creation_form(window: Hwnd) {
     destroy_world_creation_form();
     if let Some(app) = APP.as_mut() {
-        app.dialog_open = false;
+        app.dialog_open = TITLE_FORM.is_some();
         app.input.clear();
         app.last_physics = Instant::now();
     }
@@ -3428,7 +3763,7 @@ unsafe fn submit_world_creation_form(window: Hwnd) {
                     ),
                 );
                 destroy_world_creation_form();
-                app.dialog_open = false;
+                app.dialog_open = TITLE_FORM.is_some();
                 app.input.clear();
                 app.last_physics = Instant::now();
                 if app
@@ -3471,7 +3806,7 @@ unsafe fn submit_world_creation_form(window: Hwnd) {
                 format!("id={} seed={seed} mode={mode:?}", created.metadata.id),
             );
             destroy_world_creation_form();
-            app.dialog_open = false;
+            app.dialog_open = TITLE_FORM.is_some();
             app.input.clear();
             app.last_physics = Instant::now();
             activate_world(window, app, created);
@@ -3718,6 +4053,7 @@ unsafe fn open_world_from_menu(window: Hwnd, app: &mut AppState, id: &str) {
     }
 }
 
+#[allow(static_mut_refs)]
 unsafe fn activate_world(window: Hwnd, app: &mut AppState, saved: crate::world_store::StoredWorld) {
     let terrain_seed = saved.metadata.terrain_seed;
     let player_position = saved.player.position;
@@ -3769,6 +4105,9 @@ unsafe fn activate_world(window: Hwnd, app: &mut AppState, saved: crate::world_s
         ));
     }
     SCENE = Some(scene);
+    if TITLE_FORM.is_some() {
+        close_title_form(window, true);
+    }
     install_main_menu(window, app);
     let world_name = app
         .world_metadata
@@ -3966,6 +4305,7 @@ pub fn run(logger: Option<Logger>) {
         UpdateWindow(window);
         ShowCursor(0);
         lock_cursor(window);
+        open_title_form(window);
         let mut message = Message {
             hwnd: null_mut(),
             message: 0,
@@ -3981,6 +4321,7 @@ pub fn run(logger: Option<Logger>) {
                 .is_some_and(|form| form.capture_action.is_some() || form.escape_canceled_down);
             if !binding_capture_active
                 && (WORLD_FORM.is_some()
+                    || TITLE_FORM.is_some()
                     || INVENTORY_FORM.is_some()
                     || PAUSE_FORM.is_some()
                     || OPTIONS_FORM.is_some())
