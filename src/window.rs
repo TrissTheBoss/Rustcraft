@@ -14,12 +14,12 @@ use crate::drops::{BlockLootTable, ItemDrops, ITEM_PICKUP_DELAY_TICKS};
 use crate::gpu::GpuRenderer;
 use crate::grid::PLAYER_EYE_OFFSET;
 use crate::interaction::{
-    break_block, break_block_with_drop, place_block, raycast_blocks, BlockRayHit,
-    PROTOTYPE_INTERACTION_REACH,
+    break_block, break_block_with_drop, place_block, place_hotbar_block, raycast_blocks,
+    BlockRayHit, PROTOTYPE_INTERACTION_REACH,
 };
 use crate::inventory::{
     ArmorSlot, ClickButton, Inventory, InventoryMenu, InventorySlot, ItemCatalog, ItemDefinition,
-    ItemId,
+    ItemId, ItemKey,
 };
 use crate::logger::Logger;
 use crate::mining::{MiningCatalog, MiningEvent, MiningSession, MiningTool};
@@ -956,7 +956,16 @@ unsafe extern "system" fn window_proc(
                 if message == WM_KEYDOWN && (0x31..=0x39).contains(&(wparam as u32)) {
                     let slot = (wparam as usize) - 0x31;
                     let selection_changed = app.inventory.select_hotbar(slot).is_ok();
-                    if (0x31..=0x33).contains(&(wparam as u32)) {
+                    if let Some(block) = app
+                        .inventory
+                        .selected_stack()
+                        .and_then(|stack| prototype_block_for_item(stack.key))
+                    {
+                        app.selected_block = block;
+                    } else if app.player.mode == GameMode::Creative
+                        && app.inventory.selected_stack().is_none()
+                        && (0x31..=0x33).contains(&(wparam as u32))
+                    {
                         app.selected_block = crate::world::BlockId((wparam as u16) - 0x30);
                     }
                     if selection_changed {
@@ -2697,13 +2706,32 @@ fn optional_seed(text: &str) -> Result<u64, ()> {
 mod world_creation_tests {
     use super::{
         build_scene, inventory_slot, is_initial_keydown, key_for, optional_seed, player_controller,
-        stored_game_mode, GameMode, InventorySlot, StoredGameMode,
+        prototype_block_for_item, stored_game_mode, GameMode, InventorySlot, StoredGameMode,
     };
+    use crate::inventory::{ItemId, ItemKey};
     use crate::render::InputKey;
     use crate::settings::{BindingAction, KeyBindings};
     use crate::terrain::{TerrainGenerator, ROCK};
     use crate::world::ChunkPos;
     use crate::world_store::PlayerSnapshot;
+
+    #[test]
+    fn only_unmodified_prototype_block_items_map_to_placeable_blocks() {
+        for id in 1..=3 {
+            assert_eq!(
+                prototype_block_for_item(ItemKey::new(ItemId(id))),
+                Some(crate::world::BlockId(id))
+            );
+        }
+        assert_eq!(
+            prototype_block_for_item(ItemKey {
+                id: ItemId(1),
+                variant: 7,
+            }),
+            None
+        );
+        assert_eq!(prototype_block_for_item(ItemKey::new(ItemId(4))), None);
+    }
 
     #[test]
     fn seed_field_accepts_decimal_and_hex_and_rejects_invalid_values() {
@@ -3760,6 +3788,10 @@ fn prototype_item_catalog() -> ItemCatalog {
     catalog
 }
 
+fn prototype_block_for_item(key: ItemKey) -> Option<crate::world::BlockId> {
+    (key.variant == 0 && (1..=3).contains(&key.id.0)).then_some(crate::world::BlockId(key.id.0))
+}
+
 fn upload_scene_meshes(gpu: &mut GpuRenderer, scene: &Scene) {
     let meshes: Vec<&Mesh> = scene.meshes.iter().chain(&scene.drop_meshes).collect();
     gpu.upload_meshes(&meshes, &scene.materials);
@@ -3960,16 +3992,34 @@ fn handle_block_action(app: &mut AppState, scene: &mut Scene, breaking: bool) {
     } else {
         let player = app.player.transform;
         let half = app.player.half_extents;
-        place_block(
-            &mut scene.world,
-            &BlockRegistry::new(),
-            hit,
-            app.selected_block,
-            Aabb {
-                min: [player.x - half[0], player.y - half[1], player.z - half[2]],
-                max: [player.x + half[0], player.y + half[1], player.z + half[2]],
-            },
-        )
+        let player_bounds = Aabb {
+            min: [player.x - half[0], player.y - half[1], player.z - half[2]],
+            max: [player.x + half[0], player.y + half[1], player.z + half[2]],
+        };
+        if app.inventory.selected_stack().is_some() {
+            place_hotbar_block(
+                &mut scene.world,
+                &BlockRegistry::new(),
+                hit,
+                &mut app.inventory,
+                &app.item_catalog,
+                prototype_block_for_item,
+                app.player.mode == GameMode::Survival,
+                player_bounds,
+            )
+        } else if app.player.mode == GameMode::Creative {
+            // Preserve the existing Creative-only prototype selector until
+            // creative inventory contents are implemented.
+            place_block(
+                &mut scene.world,
+                &BlockRegistry::new(),
+                hit,
+                app.selected_block,
+                player_bounds,
+            )
+        } else {
+            false
+        }
     };
     if changed {
         scene.dirty = true;

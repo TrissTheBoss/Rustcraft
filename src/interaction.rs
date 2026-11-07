@@ -7,7 +7,7 @@
 
 use crate::blocks::{default_block_state, Aabb, BlockRegistry};
 use crate::drops::{BlockLootTable, DropError, ItemDrops};
-use crate::inventory::ItemCatalog;
+use crate::inventory::{Inventory, InventorySlot, ItemCatalog, ItemKey};
 use crate::world::{BlockId, World};
 use std::collections::HashSet;
 
@@ -297,6 +297,41 @@ pub fn place_full_block(
     player_bounds: Aabb,
 ) -> bool {
     place_block(world, registry, hit, block, player_bounds)
+}
+
+/// Place the block represented by the selected hotbar item. Survival placement
+/// consumes one item only after the world edit succeeds; Creative placement
+/// keeps the selected stack unchanged.
+pub fn place_hotbar_block(
+    world: &mut World,
+    registry: &BlockRegistry,
+    hit: BlockRayHit,
+    inventory: &mut Inventory,
+    catalog: &ItemCatalog,
+    block_for_item: impl Fn(ItemKey) -> Option<BlockId>,
+    consume_item: bool,
+    player_bounds: Aabb,
+) -> bool {
+    let slot = usize::from(inventory.selected_hotbar());
+    let Some(stack) = inventory.selected_stack() else {
+        return false;
+    };
+    if catalog.definition(stack.key.id).is_err() {
+        return false;
+    }
+    let Some(block) = block_for_item(stack.key) else {
+        return false;
+    };
+    if !place_block(world, registry, hit, block, player_bounds) {
+        return false;
+    }
+    if consume_item && inventory.consume(InventorySlot::Main(slot), 1).is_err() {
+        let target = std::array::from_fn(|axis| hit.position.0[axis] + hit.face_normal[axis]);
+        world.set_block(target, BlockId(0));
+        refresh_fence_connections_around(world, target, registry);
+        return false;
+    }
+    true
 }
 
 /// Recompute explicit prototype fence masks around an edited block. Fences
@@ -601,6 +636,86 @@ mod tests {
         };
         assert_eq!(break_block(&mut world, first_fence_hit), Some(BlockId(9)));
         assert_eq!(world.block_state_at(second_fence).unwrap().connections, 0);
+    }
+
+    #[test]
+    fn hotbar_block_placement_uses_and_consumes_the_selected_stack_atomically() {
+        let mut world = world_with_chunks(&[ChunkPos { x: 0, y: 0, z: 0 }]);
+        world.set_block([2, 1, 1], BlockId(3));
+        let registry = BlockRegistry::new();
+        let hit = raycast_blocks(&world, &registry, [0.5, 1.5, 1.5], [1.0, 0.0, 0.0], 5.0).unwrap();
+        let mut catalog = ItemCatalog::default();
+        catalog
+            .register(ItemId(1), ItemDefinition::stackable(64))
+            .unwrap();
+        let key = ItemKey::new(ItemId(1));
+        let mut inventory = Inventory::default();
+        inventory.insert(key, 2, &catalog).unwrap();
+        let clear_player_bounds = Aabb {
+            min: [10.0, 10.0, 10.0],
+            max: [11.0, 11.0, 11.0],
+        };
+        assert!(place_hotbar_block(
+            &mut world,
+            &registry,
+            hit,
+            &mut inventory,
+            &catalog,
+            |item| (item == key).then_some(BlockId(1)),
+            true,
+            clear_player_bounds,
+        ));
+        assert_eq!(world.block_at([1, 1, 1]), Some(BlockId(1)));
+        assert_eq!(inventory.count(key), 1);
+
+        world.set_block([1, 1, 1], BlockId(0));
+        let overlapping_player = Aabb {
+            min: [1.1, 1.0, 1.0],
+            max: [1.9, 2.0, 2.0],
+        };
+        assert!(!place_hotbar_block(
+            &mut world,
+            &registry,
+            hit,
+            &mut inventory,
+            &catalog,
+            |item| (item == key).then_some(BlockId(1)),
+            true,
+            overlapping_player,
+        ));
+        assert_eq!(inventory.count(key), 1);
+    }
+
+    #[test]
+    fn creative_hotbar_placement_does_not_consume_the_selected_stack() {
+        let mut world = world_with_chunks(&[ChunkPos { x: 0, y: 0, z: 0 }]);
+        world.set_block([2, 1, 1], BlockId(3));
+        let registry = BlockRegistry::new();
+        let hit = raycast_blocks(&world, &registry, [0.5, 1.5, 1.5], [1.0, 0.0, 0.0], 5.0).unwrap();
+        let mut catalog = ItemCatalog::default();
+        catalog
+            .register(ItemId(2), ItemDefinition::stackable(64))
+            .unwrap();
+        let key = ItemKey::new(ItemId(2));
+        let mut inventory = Inventory::default();
+        inventory.insert(key, 3, &catalog).unwrap();
+        let clear_player_bounds = Aabb {
+            min: [10.0, 10.0, 10.0],
+            max: [11.0, 11.0, 11.0],
+        };
+
+        assert!(place_hotbar_block(
+            &mut world,
+            &registry,
+            hit,
+            &mut inventory,
+            &catalog,
+            |item| (item == key).then_some(BlockId(2)),
+            false,
+            clear_player_bounds,
+        ));
+        assert_eq!(world.block_at([1, 1, 1]), Some(BlockId(2)));
+        assert_eq!(inventory.count(key), 3);
     }
 
     #[test]
