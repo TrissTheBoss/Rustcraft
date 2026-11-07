@@ -8,6 +8,10 @@ Backup filenames contain a Unix timestamp and a process-wide numeric sequence. R
 
 Chunks store only block-state overrides from their prototype defaults. Upper/lower slabs and snow-layer counts are validated, versioned, serialized, and applied to collision and ray selection; replacement resets to the new block default. Payload v1/v2 remains readable and derives known prototype defaults. The outer save envelope remains v6 because the inner world payload is separately versioned. The renderer uses prototype visual boxes and removes shared/occluded partial faces; fence and pane collision, selection, and visual shapes are separate. Reference models, connection-dependent geometry, catalogs, and complete reference behavior remain outstanding.
 
+## 2026-11-07 - Persist prototype fence connection masks in payload v4
+
+Fence state stores a four-bit north/east/south/west mask. Its set directions add prototype rail boxes to both collision and visual shapes; the empty mask leaves the post. V4 adds the mask in previously reserved state-code bits while retaining V1-V3 decoding rules, including rejecting those new bits under V3. The mask is currently explicit state data: placement/removal neighbor recomputation, material-sensitive connection rules, reference geometry, and an in-game state editor remain unimplemented. This is a data-model increment, not parity evidence.
+
 ## 2026-11-07 - Use block-local collision geometry for movement and targeting
 
 The block registry supplies prototype collision boxes and the runtime player collider and raycaster query those boxes instead of assuming each non-air block occupies a full cube. Ray traversal checks nearby owner cells so tall shapes can be selected above their base voxel. Collision and selection geometry are still coupled, block states are not stored in world data, and rendering/content definitions are incomplete; these prototypes are not Java Edition conformance evidence.

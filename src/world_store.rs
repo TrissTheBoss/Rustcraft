@@ -1743,6 +1743,7 @@ mod tests {
             kind: crate::blocks::BlockKind::Slab,
             upper: true,
             layers: 1,
+            connections: 0,
         };
         let mut world = World::new();
         world.get_or_create_chunk(ChunkPos::default());

@@ -323,6 +323,7 @@ mod tests {
             kind: crate::blocks::BlockKind::Slab,
             upper: true,
             layers: 1,
+            connections: 0,
         };
         world.set_block_state([2, 0, 0], upper_slab);
         assert!(

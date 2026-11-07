@@ -1548,6 +1548,7 @@ mod tests {
             kind: crate::blocks::BlockKind::Snow,
             upper: false,
             layers: 6,
+            connections: 0,
         };
         chunk.set_state(3, 2, 3, six_snow_layers).unwrap();
         let registry = crate::blocks::BlockRegistry::new();
@@ -1613,6 +1614,7 @@ mod tests {
                     kind: crate::blocks::BlockKind::Snow,
                     upper: false,
                     layers: 2,
+                    connections: 0,
                 },
             )
             .unwrap();
@@ -1625,6 +1627,7 @@ mod tests {
                     kind: crate::blocks::BlockKind::Snow,
                     upper: false,
                     layers: 6,
+                    connections: 0,
                 },
             )
             .unwrap();

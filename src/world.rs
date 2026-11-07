@@ -8,6 +8,7 @@ pub const CHUNK_VOLUME: usize = CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE;
 const WORLD_MAGIC_V1: &[u8; 8] = b"VOXEL01\0";
 const WORLD_MAGIC_V2: &[u8; 8] = b"VOXEL02\0";
 const WORLD_MAGIC_V3: &[u8; 8] = b"VOXEL03\0";
+const WORLD_MAGIC_V4: &[u8; 8] = b"VOXEL04\0";
 /// Bound persistent world chunks and the current generated chunk cache.
 pub const MAX_SERIALIZED_CHUNKS: usize = 16_384;
 
@@ -94,7 +95,7 @@ impl Chunk {
         Ok(())
     }
 
-    fn write_blocks_v3<W: Write>(&self, output: &mut W) -> io::Result<()> {
+    fn write_blocks_v4<W: Write>(&self, output: &mut W) -> io::Result<()> {
         self.write_block_ids(output)?;
         let count = u16::try_from(self.states.len())
             .map_err(|_| invalid_data("chunk contains too many block states"))?;
@@ -111,11 +112,11 @@ impl Chunk {
         Ok(())
     }
 
-    fn read_blocks<R: Read>(&mut self, input: &mut R, has_state_table: bool) -> io::Result<()> {
+    fn read_blocks<R: Read>(&mut self, input: &mut R, version: u8) -> io::Result<()> {
         for block in self.blocks.iter_mut() {
             *block = BlockId(read_u16(input)?);
         }
-        if !has_state_table {
+        if version < 3 {
             return Ok(());
         }
         let count = usize::from(read_u16(input)?);
@@ -131,7 +132,7 @@ impl Chunk {
                     "chunk contains an invalid or duplicate state index",
                 ));
             }
-            let state = BlockState::decode(read_u16(input)?)
+            let state = BlockState::decode_with_connections(read_u16(input)?, version >= 4)
                 .ok_or_else(|| invalid_data("chunk contains an invalid block-state value"))?;
             let block = self.blocks[usize::from(block_index)];
             let default_state = default_block_state(block);
@@ -257,7 +258,7 @@ impl World {
         let count = u32::try_from(self.chunks.len()).map_err(|_| {
             io::Error::new(io::ErrorKind::InvalidInput, "too many chunks to serialize")
         })?;
-        output.write_all(WORLD_MAGIC_V3)?;
+        output.write_all(WORLD_MAGIC_V4)?;
         output.write_all(&count.to_le_bytes())?;
         let mut positions: Vec<_> = self.chunks.keys().copied().collect();
         positions.sort_by_key(|p| (p.x, p.y, p.z));
@@ -266,7 +267,7 @@ impl World {
             output.write_all(&position.y.to_le_bytes())?;
             output.write_all(&position.z.to_le_bytes())?;
             output.write_all(&[u8::from(self.generated_chunks.contains(&position))])?;
-            self.chunks[&position].write_blocks_v3(&mut output)?;
+            self.chunks[&position].write_blocks_v4(&mut output)?;
         }
         Ok(())
     }
@@ -285,6 +286,8 @@ impl World {
             2
         } else if &header == WORLD_MAGIC_V3 {
             3
+        } else if &header == WORLD_MAGIC_V4 {
+            4
         } else {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -320,7 +323,7 @@ impl World {
                 .chunks
                 .entry(position)
                 .or_insert_with(Chunk::empty)
-                .read_blocks(&mut input, version >= 3)?;
+                .read_blocks(&mut input, version)?;
             if generated {
                 world.generated_chunks.insert(position);
             }
@@ -493,6 +496,7 @@ mod tests {
             kind: crate::blocks::BlockKind::Slab,
             upper: true,
             layers: 1,
+            connections: 0,
         };
         assert_eq!(
             world.set_block_state(slab_position, top_slab),
@@ -505,6 +509,7 @@ mod tests {
                     kind: crate::blocks::BlockKind::Snow,
                     upper: false,
                     layers: 4,
+                    connections: 0,
                 }
             ),
             None
@@ -516,15 +521,27 @@ mod tests {
             kind: crate::blocks::BlockKind::Snow,
             upper: false,
             layers: 8,
+            connections: 0,
         };
         world.set_block_state(snow_position, eight_layers);
 
+        let fence_position = [3, 1, 1];
+        world.set_block(fence_position, BlockId(9));
+        let connected_fence = BlockState {
+            kind: crate::blocks::BlockKind::Fence,
+            upper: false,
+            layers: 1,
+            connections: 0b0101,
+        };
+        world.set_block_state(fence_position, connected_fence);
+
         let mut bytes = Vec::new();
         world.save(&mut bytes).unwrap();
-        assert_eq!(&bytes[..8], WORLD_MAGIC_V3);
+        assert_eq!(&bytes[..8], WORLD_MAGIC_V4);
         let loaded = World::load(bytes.as_slice()).unwrap();
         assert_eq!(loaded.block_state_at(slab_position), Some(top_slab));
         assert_eq!(loaded.block_state_at(snow_position), Some(eight_layers));
+        assert_eq!(loaded.block_state_at(fence_position), Some(connected_fence));
         let registry = crate::blocks::BlockRegistry::new();
         assert_eq!(
             registry
@@ -541,6 +558,56 @@ mod tests {
                 .boxes()[0]
                 .max[1],
             1.0
+        );
+    }
+
+    #[test]
+    fn version_three_payloads_remain_readable_and_reject_new_state_bits() {
+        let position = [0, 0, 0];
+        let mut old_world = World::new();
+        old_world.get_or_create_chunk(ChunkPos::default());
+        old_world.set_block(position, BlockId(4));
+        old_world.set_block_state(
+            position,
+            BlockState {
+                kind: crate::blocks::BlockKind::Slab,
+                upper: true,
+                layers: 1,
+                connections: 0,
+            },
+        );
+        let mut legacy_bytes = Vec::new();
+        old_world.save(&mut legacy_bytes).unwrap();
+        legacy_bytes[..8].copy_from_slice(WORLD_MAGIC_V3);
+        assert_eq!(
+            World::load(legacy_bytes.as_slice())
+                .unwrap()
+                .block_state_at(position)
+                .unwrap()
+                .upper,
+            true
+        );
+
+        let mut connected_world = World::new();
+        connected_world.get_or_create_chunk(ChunkPos::default());
+        connected_world.set_block(position, BlockId(9));
+        connected_world.set_block_state(
+            position,
+            BlockState {
+                kind: crate::blocks::BlockKind::Fence,
+                upper: false,
+                layers: 1,
+                connections: 1,
+            },
+        );
+        let mut invalid_legacy_bytes = Vec::new();
+        connected_world.save(&mut invalid_legacy_bytes).unwrap();
+        invalid_legacy_bytes[..8].copy_from_slice(WORLD_MAGIC_V3);
+        assert_eq!(
+            World::load(invalid_legacy_bytes.as_slice())
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidData
         );
     }
 
@@ -565,6 +632,7 @@ mod tests {
             kind: crate::blocks::BlockKind::Slab,
             upper: true,
             layers: 1,
+            connections: 0,
         };
         loaded.set_block_state(position, top_slab);
         assert_eq!(loaded.set_block(position, BlockId(3)), Some(BlockId(4)));
@@ -585,6 +653,7 @@ mod tests {
                 kind: crate::blocks::BlockKind::Snow,
                 upper: false,
                 layers: 2,
+                connections: 0,
             },
         );
         let mut bytes = Vec::new();
@@ -608,6 +677,7 @@ mod tests {
                 kind: crate::blocks::BlockKind::Slab,
                 upper: true,
                 layers: 1,
+                connections: 0,
             },
         );
         let mut bytes = Vec::new();

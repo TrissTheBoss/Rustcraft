@@ -41,44 +41,74 @@ const SNOW_SHAPES: [[Aabb; 1]; 8] = [
     }],
 ];
 
-const FENCE_VISUAL_SHAPES: [Aabb; 9] = [
-    Aabb {
-        min: [6.0 / 16.0, 0.0, 6.0 / 16.0],
-        max: [10.0 / 16.0, 1.5, 10.0 / 16.0],
-    },
-    Aabb {
-        min: [0.0, 6.0 / 16.0, 6.0 / 16.0],
-        max: [6.0 / 16.0, 9.0 / 16.0, 10.0 / 16.0],
-    },
-    Aabb {
-        min: [10.0 / 16.0, 6.0 / 16.0, 6.0 / 16.0],
-        max: [1.0, 9.0 / 16.0, 10.0 / 16.0],
-    },
-    Aabb {
-        min: [0.0, 12.0 / 16.0, 6.0 / 16.0],
-        max: [6.0 / 16.0, 15.0 / 16.0, 10.0 / 16.0],
-    },
-    Aabb {
-        min: [10.0 / 16.0, 12.0 / 16.0, 6.0 / 16.0],
-        max: [1.0, 15.0 / 16.0, 10.0 / 16.0],
-    },
-    Aabb {
-        min: [6.0 / 16.0, 6.0 / 16.0, 0.0],
-        max: [10.0 / 16.0, 9.0 / 16.0, 6.0 / 16.0],
-    },
-    Aabb {
-        min: [6.0 / 16.0, 6.0 / 16.0, 10.0 / 16.0],
-        max: [10.0 / 16.0, 9.0 / 16.0, 1.0],
-    },
-    Aabb {
-        min: [6.0 / 16.0, 12.0 / 16.0, 0.0],
-        max: [10.0 / 16.0, 15.0 / 16.0, 6.0 / 16.0],
-    },
-    Aabb {
-        min: [6.0 / 16.0, 12.0 / 16.0, 10.0 / 16.0],
-        max: [10.0 / 16.0, 15.0 / 16.0, 1.0],
-    },
+const FENCE_POST: Aabb = Aabb {
+    min: [6.0 / 16.0, 0.0, 6.0 / 16.0],
+    max: [10.0 / 16.0, 1.5, 10.0 / 16.0],
+};
+const FENCE_RAILS: [[Aabb; 2]; 4] = [
+    [
+        Aabb {
+            min: [6.0 / 16.0, 6.0 / 16.0, 0.0],
+            max: [10.0 / 16.0, 9.0 / 16.0, 6.0 / 16.0],
+        },
+        Aabb {
+            min: [6.0 / 16.0, 12.0 / 16.0, 0.0],
+            max: [10.0 / 16.0, 15.0 / 16.0, 6.0 / 16.0],
+        },
+    ],
+    [
+        Aabb {
+            min: [10.0 / 16.0, 6.0 / 16.0, 6.0 / 16.0],
+            max: [1.0, 9.0 / 16.0, 10.0 / 16.0],
+        },
+        Aabb {
+            min: [10.0 / 16.0, 12.0 / 16.0, 6.0 / 16.0],
+            max: [1.0, 15.0 / 16.0, 10.0 / 16.0],
+        },
+    ],
+    [
+        Aabb {
+            min: [6.0 / 16.0, 6.0 / 16.0, 10.0 / 16.0],
+            max: [10.0 / 16.0, 9.0 / 16.0, 1.0],
+        },
+        Aabb {
+            min: [6.0 / 16.0, 12.0 / 16.0, 10.0 / 16.0],
+            max: [10.0 / 16.0, 15.0 / 16.0, 1.0],
+        },
+    ],
+    [
+        Aabb {
+            min: [0.0, 6.0 / 16.0, 6.0 / 16.0],
+            max: [6.0 / 16.0, 9.0 / 16.0, 10.0 / 16.0],
+        },
+        Aabb {
+            min: [0.0, 12.0 / 16.0, 6.0 / 16.0],
+            max: [6.0 / 16.0, 15.0 / 16.0, 10.0 / 16.0],
+        },
+    ],
 ];
+const fn build_fence_shapes() -> ([[Aabb; 9]; 16], [usize; 16]) {
+    let mut shapes = [[Aabb::FULL_BLOCK; 9]; 16];
+    let mut counts = [0; 16];
+    let mut mask = 0;
+    while mask < 16 {
+        shapes[mask][0] = FENCE_POST;
+        let mut count = 1;
+        let mut direction = 0;
+        while direction < 4 {
+            if mask & (1 << direction) != 0 {
+                shapes[mask][count] = FENCE_RAILS[direction][0];
+                shapes[mask][count + 1] = FENCE_RAILS[direction][1];
+                count += 2;
+            }
+            direction += 1;
+        }
+        counts[mask] = count;
+        mask += 1;
+    }
+    (shapes, counts)
+}
+const FENCE_DATA: ([[Aabb; 9]; 16], [usize; 16]) = build_fence_shapes();
 
 const PANE_VISUAL_SHAPES: [Aabb; 2] = [
     Aabb {
@@ -133,6 +163,7 @@ impl Aabb {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct VoxelShape {
     boxes: &'static [Aabb],
+    len: usize,
 }
 
 pub type CollisionShape = VoxelShape;
@@ -153,11 +184,12 @@ pub enum BlockKind {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct BlockState {
     pub kind: BlockKind,
-    /// Slab orientation flag; `true` means top slab. Fence/pane connections
-    /// need a richer state representation than this prototype flag.
+    /// Slab orientation flag; `true` means top slab.
     pub upper: bool,
     /// Snow layer count, clamped to the Java block-state range 1..=8.
     pub layers: u8,
+    /// Fence directions in north/east/south/west bit order (bits 0..=3).
+    pub connections: u8,
 }
 
 impl BlockState {
@@ -166,14 +198,18 @@ impl BlockState {
             kind: BlockKind::FullBlock,
             upper: false,
             layers: 1,
+            connections: 0,
         }
     }
 
     pub const fn is_valid(self) -> bool {
         match self.kind {
-            BlockKind::Snow => !self.upper && self.layers >= 1 && self.layers <= 8,
-            BlockKind::Slab => self.layers == 1,
-            _ => !self.upper && self.layers == 1,
+            BlockKind::Snow => {
+                !self.upper && self.layers >= 1 && self.layers <= 8 && self.connections == 0
+            }
+            BlockKind::Slab => self.layers == 1 && self.connections == 0,
+            BlockKind::Fence => !self.upper && self.layers == 1 && self.connections & !0x0f == 0,
+            _ => !self.upper && self.layers == 1 && self.connections == 0,
         }
     }
 
@@ -194,11 +230,19 @@ impl BlockState {
             BlockKind::Fence => 8,
             BlockKind::Pane => 9,
         };
-        Some(kind | ((self.upper as u16) << 4) | (((self.layers - 1) as u16) << 5))
+        Some(
+            kind | ((self.upper as u16) << 4)
+                | (((self.layers - 1) as u16) << 5)
+                | ((self.connections as u16) << 8),
+        )
     }
 
     pub const fn decode(code: u16) -> Option<Self> {
-        if code == 0 || code & !0x00ff != 0 {
+        Self::decode_with_connections(code, true)
+    }
+
+    pub const fn decode_with_connections(code: u16, allow_connections: bool) -> Option<Self> {
+        if code == 0 || code & if allow_connections { !0x0fff } else { !0x00ff } != 0 {
             return None;
         }
         let kind = match code & 0x000f {
@@ -217,6 +261,11 @@ impl BlockState {
             kind,
             upper: code & 0x0010 != 0,
             layers: (((code >> 5) & 0x7) + 1) as u8,
+            connections: if allow_connections {
+                ((code >> 8) & 0x0f) as u8
+            } else {
+                0
+            },
         };
         if state.is_valid() {
             Some(state)
@@ -264,10 +313,10 @@ impl BlockState {
                 min: [0.0, 0.0, 0.0],
                 max: [1.0, 15.0 / 16.0, 1.0],
             }]),
-            BlockKind::Fence => CollisionShape::from_boxes(&[Aabb {
-                min: [6.0 / 16.0, 0.0, 6.0 / 16.0],
-                max: [10.0 / 16.0, 1.5, 10.0 / 16.0],
-            }]),
+            BlockKind::Fence => VoxelShape::from_boxes_with_len(
+                &FENCE_DATA.0[self.connections as usize],
+                FENCE_DATA.1[self.connections as usize],
+            ),
             BlockKind::Pane => CollisionShape::from_boxes(&[Aabb {
                 min: [7.0 / 16.0, 0.0, 7.0 / 16.0],
                 max: [9.0 / 16.0, 1.0, 9.0 / 16.0],
@@ -285,7 +334,10 @@ impl BlockState {
 
     pub const fn visual_shape(self) -> VoxelShape {
         match self.kind {
-            BlockKind::Fence => VoxelShape::from_boxes(&FENCE_VISUAL_SHAPES),
+            BlockKind::Fence => VoxelShape::from_boxes_with_len(
+                &FENCE_DATA.0[self.connections as usize],
+                FENCE_DATA.1[self.connections as usize],
+            ),
             BlockKind::Pane => VoxelShape::from_boxes(&PANE_VISUAL_SHAPES),
             _ => self.shape(),
         }
@@ -298,59 +350,75 @@ pub const fn default_block_state(id: BlockId) -> BlockState {
             kind: BlockKind::Air,
             upper: false,
             layers: 1,
+            connections: 0,
         },
         1..=3 => BlockState::full_block(),
         4 => BlockState {
             kind: BlockKind::Slab,
             upper: false,
             layers: 1,
+            connections: 0,
         },
         5 => BlockState {
             kind: BlockKind::Carpet,
             upper: false,
             layers: 1,
+            connections: 0,
         },
         6 => BlockState {
             kind: BlockKind::Snow,
             upper: false,
             layers: 1,
+            connections: 0,
         },
         7 => BlockState {
             kind: BlockKind::Farmland,
             upper: false,
             layers: 1,
+            connections: 0,
         },
         8 => BlockState {
             kind: BlockKind::Path,
             upper: false,
             layers: 1,
+            connections: 0,
         },
         9 => BlockState {
             kind: BlockKind::Fence,
             upper: false,
             layers: 1,
+            connections: 0,
         },
         10 => BlockState {
             kind: BlockKind::Pane,
             upper: false,
             layers: 1,
+            connections: 0,
         },
         _ => BlockState::full_block(),
     }
 }
 
 impl VoxelShape {
-    pub const EMPTY: Self = Self { boxes: &[] };
+    pub const EMPTY: Self = Self { boxes: &[], len: 0 };
     pub const FULL_BLOCK: Self = Self {
         boxes: &[Aabb::FULL_BLOCK],
+        len: 1,
     };
 
     pub const fn from_boxes(boxes: &'static [Aabb]) -> Self {
-        Self { boxes }
+        Self {
+            boxes,
+            len: boxes.len(),
+        }
+    }
+
+    const fn from_boxes_with_len(boxes: &'static [Aabb], len: usize) -> Self {
+        Self { boxes, len }
     }
 
     pub fn boxes(&self) -> &'static [Aabb] {
-        self.boxes
+        &self.boxes[..self.len]
     }
 }
 
@@ -471,6 +539,7 @@ mod tests {
             kind: BlockKind::Slab,
             upper: false,
             layers: 1,
+            connections: 0,
         };
         assert_eq!(bottom_slab.shape().boxes()[0].max[1], 0.5);
         assert_eq!(
@@ -478,6 +547,7 @@ mod tests {
                 kind: BlockKind::Snow,
                 upper: false,
                 layers: 8,
+                connections: 0,
             }
             .shape()
             .boxes()[0]
@@ -489,6 +559,7 @@ mod tests {
                 kind: BlockKind::Carpet,
                 upper: false,
                 layers: 1,
+                connections: 0,
             }
             .shape()
             .boxes()[0]
@@ -524,11 +595,36 @@ mod tests {
         let fence = registry.definition(BlockId(9));
         assert_eq!(fence.collision.boxes().len(), 1);
         assert_eq!(fence.selection.boxes()[0].max, [1.0, 1.5, 1.0]);
-        assert_eq!(fence.visual.boxes().len(), 9);
+        assert_eq!(fence.visual.boxes().len(), 1);
 
         let pane = registry.definition(BlockId(10));
         assert_eq!(pane.collision.boxes().len(), 1);
         assert_eq!(pane.selection.boxes().len(), 2);
         assert_eq!(pane.visual.boxes().len(), 2);
+    }
+
+    #[test]
+    fn fence_connection_mask_controls_collision_and_visual_rails() {
+        let state = BlockState {
+            kind: BlockKind::Fence,
+            upper: false,
+            layers: 1,
+            connections: 0b0011,
+        };
+        assert_eq!(BlockState::decode(state.encode().unwrap()), Some(state));
+        assert_eq!(state.shape().boxes().len(), 5);
+        let rails = state.visual_shape().boxes();
+        assert_eq!(rails.len(), 5);
+        assert_eq!(rails[1].min[2], 0.0); // north
+        assert_eq!(rails[3].max[0], 1.0); // east
+
+        let invalid = BlockState {
+            kind: BlockKind::Slab,
+            upper: false,
+            layers: 1,
+            connections: 1,
+        };
+        assert!(!invalid.is_valid());
+        assert_eq!(invalid.encode(), None);
     }
 }
