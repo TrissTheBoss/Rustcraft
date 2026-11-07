@@ -5,7 +5,7 @@
 //! mining progression/tool rules, advanced loot, placement rules, and full
 //! inventory UI behavior remain separate requirements.
 
-use crate::blocks::{Aabb, BlockRegistry};
+use crate::blocks::{default_block_state, Aabb, BlockRegistry};
 use crate::drops::{BlockLootTable, DropError, ItemDrops};
 use crate::inventory::ItemCatalog;
 use crate::world::{BlockId, World};
@@ -189,7 +189,9 @@ pub fn break_block(world: &mut World, hit: BlockRayHit) -> Option<BlockId> {
     if hit.block.0 == 0 || world.block_at(hit.position.0) != Some(hit.block) {
         return None;
     }
-    world.set_block(hit.position.0, BlockId(0))
+    let broken = world.set_block(hit.position.0, BlockId(0))?;
+    refresh_fence_connections_around(world, hit.position.0, &BlockRegistry::new());
+    Some(broken)
 }
 
 /// Break a block and create its configured drop as one operation. Spawn
@@ -215,9 +217,9 @@ pub fn break_block_with_drop(
     Ok(Some(broken))
 }
 
-/// Place a full-block prototype item against the hit face if its destination
-/// chunk is loaded and the block would not overlap the player's body.
-pub fn place_full_block(
+/// Place a registered prototype block against the hit face if its destination
+/// chunk is loaded and its resulting state geometry does not overlap the player.
+pub fn place_block(
     world: &mut World,
     registry: &BlockRegistry,
     hit: BlockRayHit,
@@ -251,7 +253,7 @@ pub fn place_full_block(
     let Some(existing) = world.block_at(target) else {
         return false;
     };
-    if registry.is_solid(existing) {
+    if existing.0 != 0 {
         return false;
     }
     let shape = registry.definition(block).collision;
@@ -264,7 +266,88 @@ pub fn place_full_block(
     {
         return false;
     }
-    world.set_block(target, block).is_some()
+    if world.set_block(target, block).is_none() {
+        return false;
+    }
+    refresh_fence_connections_around(world, target, registry);
+    let resulting_state = world
+        .block_state_at(target)
+        .unwrap_or_else(|| default_block_state(block));
+    let overlaps_player = registry
+        .collision_shape(block, resulting_state)
+        .boxes()
+        .iter()
+        .copied()
+        .map(|bounds| bounds.translated(target))
+        .any(|bounds| bounds.intersects(player_bounds));
+    if overlaps_player {
+        world.set_block(target, BlockId(0));
+        refresh_fence_connections_around(world, target, registry);
+        return false;
+    }
+    true
+}
+
+/// Compatibility wrapper for the original full-block placement call sites.
+pub fn place_full_block(
+    world: &mut World,
+    registry: &BlockRegistry,
+    hit: BlockRayHit,
+    block: BlockId,
+    player_bounds: Aabb,
+) -> bool {
+    place_block(world, registry, hit, block, player_bounds)
+}
+
+/// Recompute explicit prototype fence masks around an edited block. Fences
+/// connect to other prototype fences and full-cube registered blocks; absent
+/// chunks are left unknown and do not gain speculative connections.
+pub fn refresh_fence_connections_around(
+    world: &mut World,
+    changed: [i32; 3],
+    registry: &BlockRegistry,
+) {
+    const DIRECTIONS: [[i32; 3]; 4] = [[0, 0, -1], [1, 0, 0], [0, 0, 1], [-1, 0, 0]];
+    let mut candidates = Vec::with_capacity(5);
+    candidates.push(changed);
+    for direction in DIRECTIONS {
+        let Some(position) = (0..3).try_fold(changed, |mut position, axis| {
+            position[axis] = position[axis].checked_add(direction[axis])?;
+            Some(position)
+        }) else {
+            continue;
+        };
+        candidates.push(position);
+    }
+
+    for position in candidates {
+        if world.block_at(position) != Some(BlockId(9)) {
+            continue;
+        }
+        let mut connections = 0u8;
+        for (index, direction) in DIRECTIONS.iter().enumerate() {
+            let Some(neighbor) = (0..3).try_fold(position, |mut neighbor, axis| {
+                neighbor[axis] = neighbor[axis].checked_add(direction[axis])?;
+                Some(neighbor)
+            }) else {
+                continue;
+            };
+            let Some(block) = world.block_at(neighbor) else {
+                continue;
+            };
+            let Some(state) = world.block_state_at(neighbor) else {
+                continue;
+            };
+            if block == BlockId(9) || registry.is_full_cube(block, state) {
+                connections |= 1 << index;
+            }
+        }
+        let mut state = world
+            .block_state_at(position)
+            .unwrap_or_else(|| default_block_state(BlockId(9)));
+        state.connections = connections;
+        let _ = world.set_block_state(position, state);
+    }
 }
 
 #[cfg(test)]
@@ -410,6 +493,67 @@ mod tests {
         assert_eq!(world.block_at([1, 1, 1]), Some(BlockId(1)));
         assert_eq!(break_block(&mut world, hit), Some(BlockId(3)));
         assert_eq!(world.block_at([2, 1, 1]), Some(BlockId(0)));
+    }
+
+    #[test]
+    fn fence_connections_recompute_on_placement_and_breaking() {
+        let mut world = world_with_chunks(&[ChunkPos { x: 0, y: 0, z: 0 }]);
+        let registry = BlockRegistry::new();
+        world.set_block([2, 1, 1], BlockId(3));
+        let rock_hit =
+            raycast_blocks(&world, &registry, [0.5, 1.5, 1.5], [1.0, 0.0, 0.0], 5.0).unwrap();
+        let far_from_player = Aabb {
+            min: [10.0, 10.0, 10.0],
+            max: [11.0, 11.0, 11.0],
+        };
+        assert!(place_full_block(
+            &mut world,
+            &registry,
+            rock_hit,
+            BlockId(9),
+            far_from_player,
+        ));
+        let west_fence = [1, 1, 1];
+        assert_eq!(
+            world.block_state_at(west_fence).unwrap().connections,
+            0b0010
+        ); // east to the rock
+
+        let fence_hit = BlockRayHit {
+            position: BlockPos(west_fence),
+            face_normal: [-1, 0, 0],
+            block: BlockId(9),
+            distance: 1.0,
+        };
+        assert!(place_full_block(
+            &mut world,
+            &registry,
+            fence_hit,
+            BlockId(9),
+            far_from_player,
+        ));
+        let second_fence = [0, 1, 1];
+        assert_eq!(
+            world.block_state_at(west_fence).unwrap().connections,
+            0b1010
+        );
+        assert_eq!(
+            world.block_state_at(second_fence).unwrap().connections,
+            0b0010
+        );
+
+        assert_eq!(break_block(&mut world, rock_hit), Some(BlockId(3)));
+        assert_eq!(
+            world.block_state_at(west_fence).unwrap().connections,
+            0b1000
+        );
+        let first_fence_hit = BlockRayHit {
+            position: BlockPos(west_fence),
+            block: BlockId(9),
+            ..fence_hit
+        };
+        assert_eq!(break_block(&mut world, first_fence_hit), Some(BlockId(9)));
+        assert_eq!(world.block_state_at(second_fence).unwrap().connections, 0);
     }
 
     #[test]

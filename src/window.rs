@@ -14,7 +14,7 @@ use crate::drops::{BlockLootTable, ItemDrops, ITEM_PICKUP_DELAY_TICKS};
 use crate::gpu::GpuRenderer;
 use crate::grid::PLAYER_EYE_OFFSET;
 use crate::interaction::{
-    break_block, break_block_with_drop, place_full_block, raycast_blocks, BlockRayHit,
+    break_block, break_block_with_drop, place_block, raycast_blocks, BlockRayHit,
     PROTOTYPE_INTERACTION_REACH,
 };
 use crate::inventory::{
@@ -3960,7 +3960,7 @@ fn handle_block_action(app: &mut AppState, scene: &mut Scene, breaking: bool) {
     } else {
         let player = app.player.transform;
         let half = app.player.half_extents;
-        place_full_block(
+        place_block(
             &mut scene.world,
             &BlockRegistry::new(),
             hit,

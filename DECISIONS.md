@@ -10,7 +10,7 @@ Chunks store only block-state overrides from their prototype defaults. Upper/low
 
 ## 2026-11-07 - Persist prototype fence connection masks in payload v4
 
-Fence state stores a four-bit north/east/south/west mask. Its set directions add prototype rail boxes to both collision and visual shapes; the empty mask leaves the post. V4 adds the mask in previously reserved state-code bits while retaining V1-V3 decoding rules, including rejecting those new bits under V3. The mask is currently explicit state data: placement/removal neighbor recomputation, material-sensitive connection rules, reference geometry, and an in-game state editor remain unimplemented. This is a data-model increment, not parity evidence.
+Fence state stores a four-bit north/east/south/west mask. Its set directions add prototype rail boxes to both collision and visual shapes; the empty mask leaves the post. V4 adds the mask in previously reserved state-code bits while retaining V1-V3 decoding rules, including rejecting those new bits under V3. Gameplay placement/breaking recomputes nearby masks using the current prototype rule (connect to fences and full cubes). Chunk-load refresh, material-sensitive reference rules, reference geometry, and an in-game state editor remain unimplemented. This is a prototype update path, not parity evidence.
 
 ## 2026-11-07 - Use block-local collision geometry for movement and targeting
 
