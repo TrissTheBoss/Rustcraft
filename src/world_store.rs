@@ -14,7 +14,8 @@ const SAVE_MAGIC_V1: &[u8; 8] = b"VXSAVE01";
 const SAVE_MAGIC_V2: &[u8; 8] = b"VXSAVE02";
 const SAVE_MAGIC_V3: &[u8; 8] = b"VXSAVE03";
 const SAVE_MAGIC_V4: &[u8; 8] = b"VXSAVE04";
-const SAVE_VERSION: u32 = 4;
+const SAVE_MAGIC_V5: &[u8; 8] = b"VXSAVE05";
+const SAVE_VERSION: u32 = 5;
 const SAVE_FILE: &str = "world.vxs";
 const BACKUP_DIR: &str = "backups";
 const MAX_NAME_BYTES: usize = 128;
@@ -76,6 +77,7 @@ pub struct WorldMetadata {
     pub id: String,
     pub name: String,
     pub seed: u64,
+    pub terrain_seed: u64,
     pub created_at: u64,
     pub updated_at: u64,
     pub game_mode: StoredGameMode,
@@ -230,6 +232,29 @@ impl WorldStore {
         world: World,
         player: PlayerSnapshot,
     ) -> io::Result<StoredWorld> {
+        self.create_with_terrain_seed(
+            name,
+            seed,
+            seed,
+            game_mode,
+            difficulty,
+            difficulty_locked,
+            world,
+            player,
+        )
+    }
+
+    fn create_with_terrain_seed(
+        &self,
+        name: &str,
+        seed: u64,
+        terrain_seed: u64,
+        game_mode: StoredGameMode,
+        difficulty: StoredDifficulty,
+        difficulty_locked: bool,
+        world: World,
+        player: PlayerSnapshot,
+    ) -> io::Result<StoredWorld> {
         let name = validate_name(name)?;
         fs::create_dir_all(&self.root)?;
         for _ in 0..100 {
@@ -243,6 +268,7 @@ impl WorldStore {
                         id,
                         name,
                         seed,
+                        terrain_seed,
                         created_at: now,
                         updated_at: now,
                         game_mode,
@@ -372,9 +398,10 @@ impl WorldStore {
 
     pub fn copy(&self, id: &str, name: &str) -> io::Result<StoredWorld> {
         let source = self.load(id)?;
-        self.create_with_options(
+        self.create_with_terrain_seed(
             name,
             source.metadata.seed,
+            source.metadata.terrain_seed,
             source.metadata.game_mode,
             source.metadata.difficulty,
             source.metadata.difficulty_locked,
@@ -459,7 +486,7 @@ impl WorldStore {
             encode_save(&restored.metadata, restored.player.clone(), &world_bytes)?;
         let current_path = self.save_path(id)?;
         if let Some((metadata, world, player)) = current {
-            self.write_snapshot_preserving(metadata, world, player, true, Some(backup_name))?;
+            self.write_snapshot_preserving(metadata, world, player, false, None)?;
         }
         self.backup_current(id, &current_path, Some(backup_name))?;
         atomic_write(&current_path, &restored_bytes)?;
@@ -488,6 +515,7 @@ impl WorldStore {
                 id: id.to_owned(),
                 name,
                 seed,
+                terrain_seed: seed,
                 created_at: now,
                 updated_at: now,
                 game_mode,
@@ -785,11 +813,12 @@ fn encode_save(
     let world_len = u64::try_from(world_bytes.len())
         .map_err(|_| invalid_input("world payload length is invalid"))?;
     let mut output = Vec::with_capacity(world_bytes.len() + 96 + name.len());
-    output.write_all(SAVE_MAGIC_V4)?;
+    output.write_all(SAVE_MAGIC_V5)?;
     output.write_all(&SAVE_VERSION.to_le_bytes())?;
     output.write_all(&name_len.to_le_bytes())?;
     output.write_all(name)?;
     output.write_all(&metadata.seed.to_le_bytes())?;
+    output.write_all(&metadata.terrain_seed.to_le_bytes())?;
     output.write_all(&metadata.created_at.to_le_bytes())?;
     output.write_all(&metadata.updated_at.to_le_bytes())?;
     output.write_all(&[metadata.game_mode as u8])?;
@@ -893,6 +922,7 @@ fn read_metadata<R: Read>(input: &mut R, id: &str) -> io::Result<(WorldMetadata,
         2 => &magic == SAVE_MAGIC_V2,
         3 => &magic == SAVE_MAGIC_V3,
         4 => &magic == SAVE_MAGIC_V4,
+        5 => &magic == SAVE_MAGIC_V5,
         _ => false,
     };
     if !version_matches_magic {
@@ -910,6 +940,7 @@ fn read_metadata<R: Read>(input: &mut R, id: &str) -> io::Result<(WorldMetadata,
     let name = String::from_utf8(name).map_err(|_| invalid_data("world name is not UTF-8"))?;
     let name = validate_name(&name).map_err(|_| invalid_data("invalid saved world name"))?;
     let seed = read_u64(input)?;
+    let terrain_seed = if version >= 5 { read_u64(input)? } else { seed };
     let created_at = read_u64(input)?;
     let updated_at = read_u64(input)?;
     let mut game_mode = [0];
@@ -930,6 +961,7 @@ fn read_metadata<R: Read>(input: &mut R, id: &str) -> io::Result<(WorldMetadata,
             id: id.to_owned(),
             name,
             seed,
+            terrain_seed,
             created_at,
             updated_at,
             game_mode,
@@ -1069,7 +1101,11 @@ fn prune_backups(directory: &Path, keep: usize, preserved: Option<&str>) -> io::
             valid_backup_name(&name).then_some((name, entry.path()))
         })
         .collect::<Vec<_>>();
-    entries.sort_by(|a, b| a.0.cmp(&b.0));
+    entries.sort_by(|a, b| {
+        backup_order(&a.0)
+            .cmp(&backup_order(&b.0))
+            .then_with(|| a.0.cmp(&b.0))
+    });
     while entries.len() > keep {
         let Some(index) = entries
             .iter()
@@ -1081,6 +1117,12 @@ fn prune_backups(directory: &Path, keep: usize, preserved: Option<&str>) -> io::
         fs::remove_file(path)?;
     }
     Ok(())
+}
+
+fn backup_order(name: &str) -> Option<(u64, u64)> {
+    let name = name.strip_prefix("backup-")?.strip_suffix(".sav")?;
+    let (timestamp, sequence) = name.split_once('-')?;
+    Some((timestamp.parse().ok()?, sequence.parse().ok()?))
 }
 
 fn sync_directory(path: &Path) -> io::Result<()> {
@@ -1258,6 +1300,23 @@ mod tests {
         v2
     }
 
+    fn encode_v4_fixture(
+        metadata: &WorldMetadata,
+        player: PlayerSnapshot,
+        world_bytes: &[u8],
+    ) -> Vec<u8> {
+        let mut v5 = encode_save(metadata, player, world_bytes).unwrap();
+        let name_len = u16::from_le_bytes([v5[12], v5[13]]) as usize;
+        let terrain_seed_offset = 14 + name_len + 8;
+        v5.drain(terrain_seed_offset..terrain_seed_offset + 8);
+        v5[..8].copy_from_slice(SAVE_MAGIC_V4);
+        v5[8..12].copy_from_slice(&4u32.to_le_bytes());
+        let payload_len = v5.len() - 8;
+        let checksum = checksum64(&v5[..payload_len]);
+        v5[payload_len..].copy_from_slice(&checksum.to_le_bytes());
+        v5
+    }
+
     #[test]
     fn create_save_load_round_trips_world_and_player_state() {
         let root = TestRoot::new();
@@ -1354,6 +1413,7 @@ mod tests {
             .unwrap();
         assert_eq!(updated.metadata.name, "Options Updated");
         assert_eq!(updated.metadata.seed, 77);
+        assert_eq!(updated.metadata.terrain_seed, created.metadata.terrain_seed);
         assert_eq!(updated.metadata.game_mode, StoredGameMode::Creative);
         assert_eq!(updated.metadata.difficulty, StoredDifficulty::Hard);
         assert!(updated.metadata.difficulty_locked);
@@ -1416,13 +1476,13 @@ mod tests {
             .unwrap();
 
         let upgraded = read_bounded(&save_path).unwrap();
-        assert_eq!(&upgraded[..8], SAVE_MAGIC_V4);
-        assert_eq!(u32::from_le_bytes(upgraded[8..12].try_into().unwrap()), 4);
+        assert_eq!(&upgraded[..8], SAVE_MAGIC_V5);
+        assert_eq!(u32::from_le_bytes(upgraded[8..12].try_into().unwrap()), 5);
         assert_eq!(store.load(&created.metadata.id).unwrap(), loaded);
     }
 
     #[test]
-    fn version_two_worlds_load_with_empty_player_items_and_upgrade_to_version_four() {
+    fn version_two_worlds_load_with_empty_player_items_and_upgrade_to_version_five() {
         let root = TestRoot::new();
         let store = WorldStore::new(&root.0);
         let created = store
@@ -1448,8 +1508,8 @@ mod tests {
             .unwrap();
 
         let upgraded = read_bounded(&save_path).unwrap();
-        assert_eq!(&upgraded[..8], SAVE_MAGIC_V4);
-        assert_eq!(u32::from_le_bytes(upgraded[8..12].try_into().unwrap()), 4);
+        assert_eq!(&upgraded[..8], SAVE_MAGIC_V5);
+        assert_eq!(u32::from_le_bytes(upgraded[8..12].try_into().unwrap()), 5);
         assert_eq!(store.load(&created.metadata.id).unwrap(), loaded);
     }
 
@@ -1491,8 +1551,96 @@ mod tests {
             .save(&mut loaded.metadata, &loaded.world, loaded.player.clone())
             .unwrap();
         let upgraded = read_bounded(&save_path).unwrap();
-        assert_eq!(&upgraded[..8], SAVE_MAGIC_V4);
+        assert_eq!(&upgraded[..8], SAVE_MAGIC_V5);
         assert_eq!(store.load(&created.metadata.id).unwrap(), loaded);
+    }
+
+    #[test]
+    fn version_four_worlds_migrate_terrain_seed_from_seed_metadata() {
+        let root = TestRoot::new();
+        let store = WorldStore::new(&root.0);
+        let mut catalog = crate::inventory::ItemCatalog::default();
+        catalog
+            .register(ItemId(12), crate::inventory::ItemDefinition::stackable(64))
+            .unwrap();
+        let mut drops = ItemDrops::default();
+        drops
+            .spawn(
+                ItemStack {
+                    key: ItemKey::new(ItemId(12)),
+                    count: 3,
+                },
+                [2.0, 3.0, 4.0],
+                5,
+                &catalog,
+            )
+            .unwrap();
+        let player = PlayerSnapshot {
+            drops,
+            ..PlayerSnapshot::default()
+        };
+        let created = store
+            .create(
+                "Version Four World",
+                42,
+                StoredGameMode::Creative,
+                test_world(),
+                player.clone(),
+            )
+            .unwrap();
+        let mut metadata = created.metadata.clone();
+        metadata.terrain_seed = 99;
+        let mut world_bytes = Vec::new();
+        created.world.save(&mut world_bytes).unwrap();
+        let legacy = encode_v4_fixture(&metadata, player.clone(), &world_bytes);
+        let save_path = store.save_path(&created.metadata.id).unwrap();
+        atomic_write(&save_path, &legacy).unwrap();
+
+        let mut loaded = store.load(&created.metadata.id).unwrap();
+        assert_eq!(loaded.metadata.seed, 42);
+        assert_eq!(loaded.metadata.terrain_seed, 42);
+        assert_eq!(loaded.player.drops, player.drops);
+        store
+            .save(&mut loaded.metadata, &loaded.world, loaded.player.clone())
+            .unwrap();
+
+        let upgraded = read_bounded(&save_path).unwrap();
+        assert_eq!(&upgraded[..8], SAVE_MAGIC_V5);
+        assert_eq!(store.load(&created.metadata.id).unwrap(), loaded);
+    }
+
+    #[test]
+    fn editing_public_seed_keeps_terrain_seed_through_copy_and_reload() {
+        let root = TestRoot::new();
+        let store = WorldStore::new(&root.0);
+        let created = store
+            .create(
+                "Seeded World",
+                19,
+                StoredGameMode::Creative,
+                test_world(),
+                PlayerSnapshot::default(),
+            )
+            .unwrap();
+        let edited = store
+            .update_options(
+                &created.metadata.id,
+                "Seeded World",
+                91,
+                StoredGameMode::Creative,
+                StoredDifficulty::Normal,
+                false,
+            )
+            .unwrap();
+        assert_eq!(edited.metadata.seed, 91);
+        assert_eq!(edited.metadata.terrain_seed, 19);
+
+        let loaded = store.load(&created.metadata.id).unwrap();
+        assert_eq!(loaded.metadata.terrain_seed, 19);
+        let copied = store.copy(&created.metadata.id, "Seeded Copy").unwrap();
+        assert_eq!(copied.metadata.seed, 91);
+        assert_eq!(copied.metadata.terrain_seed, 19);
+        assert_eq!(store.load(&copied.metadata.id).unwrap(), copied);
     }
 
     #[test]
@@ -1616,6 +1764,23 @@ mod tests {
     }
 
     #[test]
+    fn backup_retention_orders_numeric_sequences_not_lexicographic_names() {
+        let root = TestRoot::new();
+        fs::create_dir_all(&root.0).unwrap();
+        for name in ["backup-100-2.sav", "backup-100-10.sav", "backup-100-3.sav"] {
+            fs::write(root.0.join(name), b"fixture").unwrap();
+        }
+
+        prune_backups(&root.0, 2, None).unwrap();
+        let mut names: Vec<_> = fs::read_dir(&root.0)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        assert_eq!(names, vec!["backup-100-10.sav", "backup-100-3.sav"]);
+    }
+
+    #[test]
     fn restoring_backup_preserves_selected_snapshot_and_dirty_current_world() {
         let root = TestRoot::new();
         let store = WorldStore::new(&root.0);
@@ -1665,7 +1830,7 @@ mod tests {
             .list_backups(&saved.metadata.id)
             .unwrap()
             .contains(&selected_backup));
-        let retained_dirty_snapshot = store
+        let backup_snapshots: Vec<_> = store
             .list_backups(&saved.metadata.id)
             .unwrap()
             .into_iter()
@@ -1674,16 +1839,29 @@ mod tests {
                     .world_dir(&saved.metadata.id)
                     .ok()?
                     .join(BACKUP_DIR)
-                    .join(name);
-                read_bounded(&path)
+                    .join(&name);
+                let snapshot = read_bounded(&path)
                     .ok()
-                    .and_then(|bytes| decode_save(&bytes, &saved.metadata.id).ok())
+                    .and_then(|bytes| decode_save(&bytes, &saved.metadata.id).ok())?;
+                Some((name, snapshot))
             })
-            .any(|snapshot| {
-                snapshot.world.block_at(dirty_marker) == Some(BlockId(3))
-                    && snapshot.player.position == [4.0, 12.0, 5.0]
-            });
-        assert!(retained_dirty_snapshot);
+            .collect();
+        let retained_dirty_snapshot = backup_snapshots.iter().any(|(_, snapshot)| {
+            snapshot.world.block_at(dirty_marker) == Some(BlockId(3))
+                && snapshot.player.position == [4.0, 12.0, 5.0]
+        });
+        let backup_states: Vec<_> = backup_snapshots
+            .iter()
+            .map(|(name, snapshot)| {
+                (
+                    name,
+                    snapshot.world.block_at(dirty_marker),
+                    snapshot.player.position,
+                    snapshot.metadata.terrain_seed,
+                )
+            })
+            .collect();
+        assert!(retained_dirty_snapshot, "backup states: {backup_states:?}");
         assert_eq!(store.load(&saved.metadata.id).unwrap(), restored);
     }
 

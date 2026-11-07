@@ -1,6 +1,6 @@
 //! Independently authored deterministic terrain generation.
 
-use crate::world::{BlockId, Chunk, ChunkPos, World, CHUNK_SIZE};
+use crate::world::{BlockId, Chunk, ChunkPos, World, CHUNK_SIZE, MAX_SERIALIZED_CHUNKS};
 
 pub const AIR: BlockId = BlockId(0);
 pub const SOIL: BlockId = BlockId(1);
@@ -35,9 +35,21 @@ impl TerrainGenerator {
         let mut chunk = Chunk::empty();
         for z in 0..CHUNK_SIZE {
             for x in 0..CHUNK_SIZE {
-                let height = self.height_at(position.x * 16 + x as i32, position.z * 16 + z as i32);
+                let height = self.height_at(
+                    position
+                        .x
+                        .saturating_mul(CHUNK_SIZE as i32)
+                        .saturating_add(x as i32),
+                    position
+                        .z
+                        .saturating_mul(CHUNK_SIZE as i32)
+                        .saturating_add(z as i32),
+                );
                 for y in 0..CHUNK_SIZE {
-                    let world_y = position.y * 16 + y as i32;
+                    let world_y = position
+                        .y
+                        .saturating_mul(CHUNK_SIZE as i32)
+                        .saturating_add(y as i32);
                     let block = if world_y < 0 || world_y > height {
                         AIR
                     } else if world_y == height {
@@ -63,6 +75,55 @@ impl TerrainGenerator {
             }
         }
         world
+    }
+
+    /// Ensure a bounded square of horizontal terrain chunks around `center`.
+    /// Existing chunks are preserved so edits and imported terrain are never
+    /// replaced by generated content.
+    pub fn ensure_region(
+        &self,
+        world: &mut World,
+        center: ChunkPos,
+        radius: i32,
+    ) -> Result<Vec<ChunkPos>, &'static str> {
+        if !(0..=16).contains(&radius) {
+            return Err("terrain region radius is outside the supported bound");
+        }
+        let mut requested = Vec::with_capacity(((radius * 2 + 1).pow(2)) as usize);
+        for z_offset in -radius..=radius {
+            for x_offset in -radius..=radius {
+                requested.push(ChunkPos {
+                    x: center
+                        .x
+                        .checked_add(x_offset)
+                        .ok_or("terrain chunk coordinate overflow")?,
+                    y: 0,
+                    z: center
+                        .z
+                        .checked_add(z_offset)
+                        .ok_or("terrain chunk coordinate overflow")?,
+                });
+            }
+        }
+        let missing: Vec<_> = requested
+            .into_iter()
+            .filter(|position| world.get_chunk(*position).is_none())
+            .collect();
+        let min_chunk = i32::MIN.div_euclid(CHUNK_SIZE as i32);
+        let max_chunk = i32::MAX.div_euclid(CHUNK_SIZE as i32);
+        if missing.iter().any(|position| {
+            !(min_chunk..=max_chunk).contains(&position.x)
+                || !(min_chunk..=max_chunk).contains(&position.z)
+        }) {
+            return Err("terrain chunk exceeds the world coordinate limit");
+        }
+        if world.chunk_count().saturating_add(missing.len()) > MAX_SERIALIZED_CHUNKS {
+            return Err("terrain region would exceed the world chunk limit");
+        }
+        for position in &missing {
+            *world.get_or_create_chunk(*position) = self.generate_chunk(*position);
+        }
+        Ok(missing)
     }
 }
 
@@ -99,5 +160,61 @@ mod tests {
         }
         assert!(kinds.contains(&ROCK) && kinds.contains(&SURFACE));
         assert_ne!(generator.height_at(0, 0), generator.height_at(15, 15));
+    }
+
+    #[test]
+    fn region_generation_fills_only_missing_chunks_and_respects_negative_coordinates() {
+        let generator = TerrainGenerator::default();
+        let mut world = World::new();
+        let preserved = ChunkPos { x: -3, y: 0, z: 4 };
+        world
+            .get_or_create_chunk(preserved)
+            .set(0, 0, 0, ROCK)
+            .unwrap();
+
+        let generated = generator
+            .ensure_region(&mut world, ChunkPos { x: -3, y: 0, z: 4 }, 1)
+            .unwrap();
+        assert_eq!(generated.len(), 8);
+        assert_eq!(world.chunk_count(), 9);
+        assert_eq!(world.get_chunk(preserved).unwrap().get(0, 0, 0), Ok(ROCK));
+        assert!(generated.contains(&ChunkPos { x: -4, y: 0, z: 4 }));
+        assert!(generated.contains(&ChunkPos { x: -2, y: 0, z: 3 }));
+        assert!(generator
+            .ensure_region(&mut world, ChunkPos { x: -3, y: 0, z: 4 }, 1)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn region_generation_rejects_invalid_or_overflowing_requests_before_mutation() {
+        let generator = TerrainGenerator::default();
+        let mut world = World::new();
+        assert!(generator
+            .ensure_region(&mut world, ChunkPos::default(), 17)
+            .is_err());
+        assert!(generator
+            .ensure_region(
+                &mut world,
+                ChunkPos {
+                    x: i32::MAX,
+                    y: 0,
+                    z: 0,
+                },
+                1,
+            )
+            .is_err());
+        assert!(generator
+            .ensure_region(
+                &mut world,
+                ChunkPos {
+                    x: i32::MAX / CHUNK_SIZE as i32 + 1,
+                    y: 0,
+                    z: 0,
+                },
+                0,
+            )
+            .is_err());
+        assert_eq!(world.chunk_count(), 0);
     }
 }

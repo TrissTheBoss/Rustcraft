@@ -1,5 +1,13 @@
 # Architecture decisions
 
+## 2026-11-07 - Order backup retention by numeric time and sequence
+
+Backup filenames contain a Unix timestamp and a process-wide numeric sequence. Retention parses and compares both numbers instead of sorting filenames lexicographically, which can misorder sequences once the counter reaches two or more digits and delete a fresh recovery point. A preserved user-selected backup remains pinned while the oldest unpinned snapshot is pruned.
+
+## 2026-11-07 - Generate terrain around the active player region
+
+The world store distinguishes the editable/displayed seed from an immutable terrain-generation seed. Save v5 persists both; v1-v4 migrate the generation seed from their existing seed field. Copies preserve the source generation seed even after the displayed seed has been edited. The scene ensures a bounded 5x5 horizontal region exists around the player's chunk and rebuilds the active render mesh set when the player crosses a chunk boundary. Generation preserves existing chunk data and uses the generation seed, so revisiting and reopening a world does not replace edits or vary generated terrain. Generated chunks remain resident and are still serialized with the world; eviction, region files, and bounded long-term memory remain required streaming work. Current terrain remains original prototype content and has no Java Edition conformance evidence.
+
 ## 2026-11-06 — Replace launcher product with clean-room engine
 
 Rustcraft launcher and Fabric-trigger code were removed from the active tree after the product direction changed. Git history remains intact for auditability; the active product is now Voxel Engine.

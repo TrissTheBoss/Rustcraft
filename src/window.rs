@@ -279,6 +279,9 @@ static mut OPTIONS_FORM: Option<OptionsForm> = None;
 
 struct Scene {
     world: crate::world::World,
+    terrain_generator: TerrainGenerator,
+    stream_center: (i32, i32),
+    failed_stream_center: Option<(i32, i32)>,
     meshes: Vec<Mesh>,
     drop_meshes: Vec<Mesh>,
     mesh_positions: Vec<ChunkPos>,
@@ -604,6 +607,29 @@ unsafe extern "system" fn window_proc(
                                 BlockRegistry::new().is_solid(chunk.get(lx, ly, lz).unwrap())
                             })
                         });
+                        let center = (
+                            (app.player.transform.x / CHUNK_SIZE as f64).floor() as i32,
+                            (app.player.transform.z / CHUNK_SIZE as f64).floor() as i32,
+                        );
+                        if let Some(scene) = SCENE.as_mut() {
+                            match scene.stream_to(center) {
+                                Ok(true) => {
+                                    app.logger.event(
+                                        "INFO",
+                                        "terrain_region_loaded",
+                                        format!("center={},{}", center.0, center.1),
+                                    );
+                                    if let Some(gpu) = app.gpu.as_mut() {
+                                        upload_scene_meshes(gpu, scene);
+                                    }
+                                }
+                                Ok(false) => {}
+                                Err(error) => {
+                                    app.logger
+                                        .event("WARN", "terrain_region_load_failed", error)
+                                }
+                            }
+                        }
                         if app.player.transform != previous_transform
                             || app.player.velocity != previous_velocity
                             || app.player.flying != previous_flying
@@ -2563,7 +2589,7 @@ unsafe fn build_world_form(window: Hwnd, world: Option<StoredWorld>, new_name: S
     add_form_label(
         window,
         &mut controls,
-        "Options are saved as world metadata. Changing a seed does not regenerate terrain.",
+        "Options are saved as world metadata. Changing the displayed seed does not alter generated terrain.",
         left,
         top,
         326,
@@ -2670,11 +2696,13 @@ fn optional_seed(text: &str) -> Result<u64, ()> {
 #[cfg(test)]
 mod world_creation_tests {
     use super::{
-        inventory_slot, is_initial_keydown, key_for, optional_seed, player_controller,
+        build_scene, inventory_slot, is_initial_keydown, key_for, optional_seed, player_controller,
         stored_game_mode, GameMode, InventorySlot, StoredGameMode,
     };
     use crate::render::InputKey;
     use crate::settings::{BindingAction, KeyBindings};
+    use crate::terrain::{TerrainGenerator, ROCK};
+    use crate::world::ChunkPos;
     use crate::world_store::PlayerSnapshot;
 
     #[test]
@@ -2742,6 +2770,32 @@ mod world_creation_tests {
         );
         assert!(key_for(0x45, bindings).is_empty());
         assert!(key_for(0x31, bindings).is_empty());
+    }
+
+    #[test]
+    fn scene_streams_render_region_around_player_without_replacing_edits() {
+        let generator = TerrainGenerator::default();
+        let mut world = generator.generate_region(2);
+        world.set_block([1, 15, 1], ROCK);
+        let mut scene = build_scene(world, generator, (0, 0));
+
+        assert_eq!(scene.mesh_positions.len(), 25);
+        assert!(scene
+            .mesh_positions
+            .contains(&ChunkPos { x: -2, y: 0, z: 2 }));
+        assert!(scene.stream_to((1, 0)).unwrap());
+        assert_eq!(scene.mesh_positions.len(), 25);
+        assert!(scene
+            .mesh_positions
+            .contains(&ChunkPos { x: 3, y: 0, z: 0 }));
+        assert!(scene
+            .world
+            .get_chunk(ChunkPos { x: 3, y: 0, z: 0 })
+            .is_some());
+        assert_eq!(scene.world.block_at([1, 15, 1]), Some(ROCK));
+        assert!(!scene.stream_to((1, 0)).unwrap());
+        assert!(scene.stream_to((0, 0)).unwrap());
+        assert_eq!(scene.world.block_at([1, 15, 1]), Some(ROCK));
     }
 }
 
@@ -3286,6 +3340,8 @@ unsafe fn open_world_from_menu(window: Hwnd, app: &mut AppState, id: &str) {
 }
 
 unsafe fn activate_world(window: Hwnd, app: &mut AppState, saved: crate::world_store::StoredWorld) {
+    let terrain_seed = saved.metadata.terrain_seed;
+    let player_position = saved.player.position;
     app.player = player_controller(&saved.player, saved.metadata.game_mode);
     app.selected_block = saved.player.selected_block;
     app.inventory = saved.player.inventory;
@@ -3300,7 +3356,28 @@ unsafe fn activate_world(window: Hwnd, app: &mut AppState, saved: crate::world_s
     app.jump_was_pressed = false;
     app.last_jump_press = None;
     app.last_physics = Instant::now();
-    let mut scene = build_scene(saved.world);
+    let terrain_generator = TerrainGenerator {
+        seed: terrain_seed,
+        ..TerrainGenerator::default()
+    };
+    let stream_center = (
+        (player_position[0] / CHUNK_SIZE as f64).floor() as i32,
+        (player_position[2] / CHUNK_SIZE as f64).floor() as i32,
+    );
+    let mut world = saved.world;
+    if let Err(error) = terrain_generator.ensure_region(
+        &mut world,
+        ChunkPos {
+            x: stream_center.0,
+            y: 0,
+            z: stream_center.1,
+        },
+        STREAM_RADIUS,
+    ) {
+        app.logger
+            .event("WARN", "initial_terrain_region_failed", error);
+    }
+    let mut scene = build_scene(world, terrain_generator, stream_center);
     scene.drop_meshes = build_drop_meshes(&app.drops);
     if let Some(gpu) = app.gpu.as_mut() {
         upload_scene_meshes(gpu, &scene);
@@ -3355,7 +3432,7 @@ pub fn run(logger: Option<Logger>) {
         let saved = store.open_or_create_prototype(generated)?;
         Ok((store, saved))
     });
-    let (world_store, world_metadata, initial_player, world) = match loaded {
+    let (world_store, world_metadata, initial_player, mut world) = match loaded {
         Ok((store, saved)) => (Some(store), Some(saved.metadata), saved.player, saved.world),
         Err(error) => {
             logger.event(
@@ -3376,7 +3453,29 @@ pub fn run(logger: Option<Logger>) {
         .map(|metadata| metadata.game_mode)
         .unwrap_or(StoredGameMode::Creative);
     let player = player_controller(&initial_player, mode);
-    let mut scene = build_scene(world);
+    let terrain_generator = TerrainGenerator {
+        seed: world_metadata
+            .as_ref()
+            .map(|metadata| metadata.terrain_seed)
+            .unwrap_or_else(|| TerrainGenerator::default().seed),
+        ..TerrainGenerator::default()
+    };
+    let stream_center = (
+        (initial_player.position[0] / CHUNK_SIZE as f64).floor() as i32,
+        (initial_player.position[2] / CHUNK_SIZE as f64).floor() as i32,
+    );
+    if let Err(error) = terrain_generator.ensure_region(
+        &mut world,
+        ChunkPos {
+            x: stream_center.0,
+            y: 0,
+            z: stream_center.1,
+        },
+        STREAM_RADIUS,
+    ) {
+        logger.event("WARN", "initial_terrain_region_failed", error);
+    }
+    let mut scene = build_scene(world, terrain_generator, stream_center);
     scene.drop_meshes = build_drop_meshes(&initial_player.drops);
     let mut camera = Camera::default();
     camera.fov_degrees = settings.field_of_view_degrees as f32;
@@ -3515,8 +3614,79 @@ pub fn run(logger: Option<Logger>) {
     }
 }
 
-fn build_scene(world: crate::world::World) -> Scene {
-    const REGION_RADIUS: i32 = 2;
+const STREAM_RADIUS: i32 = 2;
+
+impl Scene {
+    fn stream_to(&mut self, center: (i32, i32)) -> Result<bool, &'static str> {
+        if center == self.stream_center || self.failed_stream_center == Some(center) {
+            return Ok(false);
+        }
+        let positions = match region_positions(center, STREAM_RADIUS) {
+            Ok(positions) => positions,
+            Err(error) => {
+                self.failed_stream_center = Some(center);
+                return Err(error);
+            }
+        };
+        if let Err(error) = self.terrain_generator.ensure_region(
+            &mut self.world,
+            ChunkPos {
+                x: center.0,
+                y: 0,
+                z: center.1,
+            },
+            STREAM_RADIUS,
+        ) {
+            self.failed_stream_center = Some(center);
+            return Err(error);
+        }
+        self.meshes = positions
+            .iter()
+            .map(|position| {
+                build_chunk_mesh(
+                    &self.world,
+                    *position,
+                    self.block_textures,
+                    self.grass_top_texture,
+                )
+            })
+            .collect();
+        self.mesh_positions = positions;
+        self.stream_center = center;
+        self.failed_stream_center = None;
+        Ok(true)
+    }
+}
+
+fn region_positions(center: (i32, i32), radius: i32) -> Result<Vec<ChunkPos>, &'static str> {
+    if !(0..=16).contains(&radius) {
+        return Err("terrain region radius is outside the supported bound");
+    }
+    let mut positions = Vec::with_capacity(((radius * 2 + 1).pow(2)) as usize);
+    for z_offset in -radius..=radius {
+        for x_offset in -radius..=radius {
+            positions.push(ChunkPos {
+                x: center
+                    .0
+                    .checked_add(x_offset)
+                    .ok_or("terrain chunk coordinate overflow")?,
+                y: 0,
+                z: center
+                    .1
+                    .checked_add(z_offset)
+                    .ok_or("terrain chunk coordinate overflow")?,
+            });
+        }
+    }
+    Ok(positions)
+}
+
+fn build_scene(
+    world: crate::world::World,
+    terrain_generator: TerrainGenerator,
+    stream_center: (i32, i32),
+) -> Scene {
+    let mesh_positions = region_positions(stream_center, STREAM_RADIUS).unwrap_or_default();
     let mut materials = MaterialRegistry::default();
     let extracted = std::path::Path::new("assets/extracted/textures/blocks");
     let mut texture = |name: &str| {
@@ -3557,15 +3727,15 @@ fn build_scene(world: crate::world::World) -> Scene {
         )
         .unwrap();
     let block_textures = [None, dirt, grass, stone];
-    let mesh_positions: Vec<_> = (-REGION_RADIUS..=REGION_RADIUS)
-        .flat_map(|z| (-REGION_RADIUS..=REGION_RADIUS).map(move |x| ChunkPos { x, y: 0, z }))
-        .collect();
     let meshes = mesh_positions
         .iter()
         .map(|position| build_chunk_mesh(&world, *position, block_textures, grass_top.or(dirt)))
         .collect();
     Scene {
         world,
+        terrain_generator,
+        stream_center,
+        failed_stream_center: None,
         meshes,
         drop_meshes: Vec::new(),
         mesh_positions,
