@@ -25,7 +25,7 @@ use crate::logger::Logger;
 use crate::mining::{MiningCatalog, MiningEvent, MiningSession, MiningTool};
 use crate::movement::{GameMode, MovementInput, PlayerController};
 use crate::render::{
-    greedy_mesh_chunk, load_png, Camera, CpuRenderer, DirectionalLight, InputKey, InputState,
+    load_png, mesh_chunk_with_shapes, Camera, CpuRenderer, DirectionalLight, InputKey, InputState,
     Material, MaterialRegistry, Mesh, Renderer, Vec3,
 };
 use crate::settings::{
@@ -602,9 +602,7 @@ unsafe extern "system" fn window_proc(
                                     scene.world.block_state_at(block_position),
                                 ) {
                                     (Some(block), Some(state)) => {
-                                        BlockRegistry::new()
-                                            .definition_with_state(block, state)
-                                            .collision
+                                        BlockRegistry::new().collision_shape(block, state)
                                     }
                                     _ => crate::blocks::CollisionShape::EMPTY,
                                 }
@@ -3798,16 +3796,35 @@ fn build_chunk_mesh(
     let Some(chunk) = world.get_chunk(position) else {
         return Mesh::default();
     };
-    let mut mesh = greedy_mesh_chunk(chunk, |local_x, local_y, local_z| {
-        let world_position = [
-            position.x * CHUNK_SIZE as i32 + local_x,
-            position.y * CHUNK_SIZE as i32 + local_y,
-            position.z * CHUNK_SIZE as i32 + local_z,
-        ];
-        world
-            .block_at(world_position)
-            .is_some_and(|block| BlockRegistry::new().is_solid(block))
-    });
+    let registry = BlockRegistry::new();
+    let mut mesh = mesh_chunk_with_shapes(
+        chunk,
+        |local_x, local_y, local_z| {
+            let world_position = [
+                position.x * CHUNK_SIZE as i32 + local_x,
+                position.y * CHUNK_SIZE as i32 + local_y,
+                position.z * CHUNK_SIZE as i32 + local_z,
+            ];
+            match (
+                world.block_at(world_position),
+                world.block_state_at(world_position),
+            ) {
+                (Some(block), Some(state)) => registry.is_full_cube(block, state),
+                _ => false,
+            }
+        },
+        |x, y, z, block| {
+            let world_position = [
+                position.x * CHUNK_SIZE as i32 + x as i32,
+                position.y * CHUNK_SIZE as i32 + y as i32,
+                position.z * CHUNK_SIZE as i32 + z as i32,
+            ];
+            world
+                .block_state_at(world_position)
+                .map(|state| registry.visual_boxes(block, state))
+                .unwrap_or_else(|| registry.definition(block).collision.boxes())
+        },
+    );
     for vertex in &mut mesh.vertices {
         vertex.position.x += (position.x * CHUNK_SIZE as i32) as f32;
         vertex.position.y += (position.y * CHUNK_SIZE as i32) as f32;

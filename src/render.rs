@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 
 use image::ImageReader;
 
+use crate::blocks::Aabb;
 use crate::world::{BlockId, Chunk, CHUNK_SIZE};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -529,6 +530,159 @@ pub fn greedy_mesh_chunk(chunk: &Chunk, mut is_solid: impl FnMut(i32, i32, i32) 
     }
     mesh.recalculate_bounds();
     mesh
+}
+
+/// Greedy-mesh full cubes and emit prototype model boxes for other blocks.
+/// Geometry remains block-local so the caller can translate the resulting mesh.
+pub fn mesh_chunk_with_shapes(
+    chunk: &Chunk,
+    mut is_full_cube: impl FnMut(i32, i32, i32) -> bool,
+    mut visual_boxes: impl FnMut(usize, usize, usize, BlockId) -> &'static [Aabb],
+) -> Mesh {
+    let mut full_cubes = Chunk::empty();
+    for y in 0..CHUNK_SIZE {
+        for z in 0..CHUNK_SIZE {
+            for x in 0..CHUNK_SIZE {
+                let block = chunk.get(x, y, z).unwrap();
+                if block != BlockId(0) && is_full_cube(x as i32, y as i32, z as i32) {
+                    full_cubes.set(x, y, z, block).unwrap();
+                }
+            }
+        }
+    }
+
+    let mut mesh = greedy_mesh_chunk(&full_cubes, |x, y, z| is_full_cube(x, y, z));
+    for y in 0..CHUNK_SIZE {
+        for z in 0..CHUNK_SIZE {
+            for x in 0..CHUNK_SIZE {
+                let block = chunk.get(x, y, z).unwrap();
+                if block == BlockId(0) || is_full_cube(x as i32, y as i32, z as i32) {
+                    continue;
+                }
+                for bounds in visual_boxes(x, y, z, block) {
+                    append_shape_box(&mut mesh, block, [x, y, z], *bounds, &mut is_full_cube);
+                }
+            }
+        }
+    }
+    mesh.recalculate_bounds();
+    mesh
+}
+
+fn append_shape_box(
+    mesh: &mut Mesh,
+    block: BlockId,
+    cell: [usize; 3],
+    bounds: Aabb,
+    is_full_cube: &mut impl FnMut(i32, i32, i32) -> bool,
+) {
+    let min = [
+        bounds.min[0] as f32,
+        bounds.min[1] as f32,
+        bounds.min[2] as f32,
+    ];
+    let max = [
+        bounds.max[0] as f32,
+        bounds.max[1] as f32,
+        bounds.max[2] as f32,
+    ];
+    let faces: [([i32; 3], [f32; 3], [[f32; 3]; 4]); 6] = [
+        (
+            [1, 0, 0],
+            [1.0, 0.0, 0.0],
+            [
+                [max[0], min[1], min[2]],
+                [max[0], max[1], min[2]],
+                [max[0], max[1], max[2]],
+                [max[0], min[1], max[2]],
+            ],
+        ),
+        (
+            [-1, 0, 0],
+            [-1.0, 0.0, 0.0],
+            [
+                [min[0], min[1], max[2]],
+                [min[0], max[1], max[2]],
+                [min[0], max[1], min[2]],
+                [min[0], min[1], min[2]],
+            ],
+        ),
+        (
+            [0, 1, 0],
+            [0.0, 1.0, 0.0],
+            [
+                [min[0], max[1], max[2]],
+                [max[0], max[1], max[2]],
+                [max[0], max[1], min[2]],
+                [min[0], max[1], min[2]],
+            ],
+        ),
+        (
+            [0, -1, 0],
+            [0.0, -1.0, 0.0],
+            [
+                [min[0], min[1], min[2]],
+                [max[0], min[1], min[2]],
+                [max[0], min[1], max[2]],
+                [min[0], min[1], max[2]],
+            ],
+        ),
+        (
+            [0, 0, 1],
+            [0.0, 0.0, 1.0],
+            [
+                [max[0], min[1], max[2]],
+                [max[0], max[1], max[2]],
+                [min[0], max[1], max[2]],
+                [min[0], min[1], max[2]],
+            ],
+        ),
+        (
+            [0, 0, -1],
+            [0.0, 0.0, -1.0],
+            [
+                [min[0], min[1], min[2]],
+                [min[0], max[1], min[2]],
+                [max[0], max[1], min[2]],
+                [max[0], min[1], min[2]],
+            ],
+        ),
+    ];
+    let uv = [[0.0, 0.0], [0.0, 1.0], [1.0, 1.0], [1.0, 0.0]];
+    for (offset, normal, corners) in faces {
+        let on_cell_boundary = match offset {
+            [1, 0, 0] => max[0] == 1.0,
+            [-1, 0, 0] => min[0] == 0.0,
+            [0, 1, 0] => max[1] == 1.0,
+            [0, -1, 0] => min[1] == 0.0,
+            [0, 0, 1] => max[2] == 1.0,
+            _ => min[2] == 0.0,
+        };
+        let neighbor = [
+            cell[0] as i32 + offset[0],
+            cell[1] as i32 + offset[1],
+            cell[2] as i32 + offset[2],
+        ];
+        if on_cell_boundary && is_full_cube(neighbor[0], neighbor[1], neighbor[2]) {
+            continue;
+        }
+        let first = mesh.vertices.len() as u32;
+        for index in 0..4 {
+            mesh.vertices.push(Vertex {
+                position: Vec3::new(
+                    cell[0] as f32 + corners[index][0],
+                    cell[1] as f32 + corners[index][1],
+                    cell[2] as f32 + corners[index][2],
+                ),
+                normal: Vec3::new(normal[0], normal[1], normal[2]),
+                block,
+                texture: None,
+                uv: uv[index],
+            });
+        }
+        mesh.indices
+            .extend_from_slice(&[first, first + 1, first + 2, first, first + 2, first + 3]);
+    }
 }
 
 fn face_cell(face: Face, layer: usize, u: usize, v: usize) -> (usize, usize, usize) {
@@ -1285,6 +1439,32 @@ mod tests {
         assert!(mesh.triangle_count() < 4 * 4 * 6);
         assert_eq!(mesh.triangle_count(), 6 * 2);
         assert_eq!(mesh.vertices[0].block, BlockId(1));
+    }
+
+    #[test]
+    fn shape_mesher_uses_state_geometry_instead_of_a_full_cube() {
+        let mut chunk = Chunk::empty();
+        chunk.set(1, 2, 3, BlockId(4)).unwrap();
+        chunk.set(3, 2, 3, BlockId(6)).unwrap();
+        let six_snow_layers = crate::blocks::BlockState {
+            kind: crate::blocks::BlockKind::Snow,
+            upper: false,
+            layers: 6,
+        };
+        chunk.set_state(3, 2, 3, six_snow_layers).unwrap();
+        let registry = crate::blocks::BlockRegistry::new();
+        let mesh = mesh_chunk_with_shapes(
+            &chunk,
+            |_, _, _| false,
+            |x, y, z, block| {
+                let state = chunk.get_state(x, y, z).unwrap();
+                registry.visual_boxes(block, state)
+            },
+        );
+
+        assert_eq!(mesh.triangle_count(), 24);
+        assert_eq!(mesh.bounds_min, Vec3::new(1.0, 2.0, 3.0));
+        assert_eq!(mesh.bounds_max, Vec3::new(4.0, 2.75, 4.0));
     }
 
     #[test]

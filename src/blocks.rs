@@ -420,6 +420,33 @@ impl BlockRegistry {
         definition
     }
 
+    pub fn collision_shape(&self, id: BlockId, state: BlockState) -> CollisionShape {
+        self.definition_with_state(id, state).collision
+    }
+
+    /// Selection currently follows collision geometry for this prototype
+    /// catalog. Keeping the query separate allows future definitions to diverge.
+    pub fn selection_shape(&self, id: BlockId, state: BlockState) -> CollisionShape {
+        self.collision_shape(id, state)
+    }
+
+    /// Original prototype geometry for rendering. These simple shapes are not
+    /// reference models; block families can provide independent model data later.
+    pub fn visual_boxes(&self, id: BlockId, state: BlockState) -> &'static [Aabb] {
+        if id.0 == 0 {
+            return CollisionShape::EMPTY.boxes();
+        }
+        if state.is_valid() && state.kind == default_block_state(id).kind {
+            state.shape().boxes()
+        } else {
+            self.definition(id).collision.boxes()
+        }
+    }
+
+    pub fn is_full_cube(&self, id: BlockId, state: BlockState) -> bool {
+        id.0 != 0 && self.visual_boxes(id, state) == CollisionShape::FULL_BLOCK.boxes()
+    }
+
     pub fn is_solid(&self, id: BlockId) -> bool {
         !self.definition(id).collision.boxes().is_empty()
     }

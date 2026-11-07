@@ -107,11 +107,7 @@ pub fn raycast_blocks(
                     let Some(state) = world.block_state_at(position) else {
                         continue;
                     };
-                    for local_shape in registry
-                        .definition_with_state(block, state)
-                        .collision
-                        .boxes()
-                    {
+                    for local_shape in registry.selection_shape(block, state).boxes() {
                         let Some((distance, face_normal)) =
                             ray_aabb(origin, direction, local_shape.translated(position))
                                 .filter(|(distance, _)| *distance <= max_distance)
