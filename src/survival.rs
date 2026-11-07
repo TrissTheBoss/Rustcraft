@@ -6,6 +6,84 @@
 
 pub const MAX_HEALTH: u8 = 20;
 pub const SAFE_FALL_DISTANCE: f64 = 3.0;
+pub const MAX_FOOD_LEVEL: u8 = 20;
+pub const MAX_FOOD_SATURATION_MILLI: u16 = 20_000;
+pub const EXHAUSTION_PER_FOOD_POINT_MILLI: u16 = 4_000;
+
+/// Saved hunger state. Exact exhaustion sources and thresholds must be checked
+/// against the pinned Java Edition runtime before this is treated as parity.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FoodState {
+    food_level: u8,
+    saturation_milli: u16,
+    exhaustion_milli: u16,
+}
+
+impl Default for FoodState {
+    fn default() -> Self {
+        Self {
+            food_level: MAX_FOOD_LEVEL,
+            saturation_milli: MAX_FOOD_SATURATION_MILLI,
+            exhaustion_milli: 0,
+        }
+    }
+}
+
+impl FoodState {
+    pub const fn from_saved(
+        food_level: u8,
+        saturation_milli: u16,
+        exhaustion_milli: u16,
+    ) -> Option<Self> {
+        if food_level <= MAX_FOOD_LEVEL
+            && saturation_milli <= MAX_FOOD_SATURATION_MILLI
+            && saturation_milli <= food_level as u16 * 1_000
+            && exhaustion_milli < EXHAUSTION_PER_FOOD_POINT_MILLI
+        {
+            Some(Self {
+                food_level,
+                saturation_milli,
+                exhaustion_milli,
+            })
+        } else {
+            None
+        }
+    }
+
+    pub const fn food_level(self) -> u8 {
+        self.food_level
+    }
+
+    pub const fn saturation_milli(self) -> u16 {
+        self.saturation_milli
+    }
+
+    pub const fn exhaustion_milli(self) -> u16 {
+        self.exhaustion_milli
+    }
+
+    /// Apply accumulated exhaustion in fixed point, preserving fractional
+    /// progress and consuming saturation before food. Activity sources are
+    /// deliberately supplied by the caller so their reference rates can be
+    /// calibrated independently.
+    pub fn apply_exhaustion(&mut self, amount_milli: u32) -> u8 {
+        let threshold = u32::from(EXHAUSTION_PER_FOOD_POINT_MILLI);
+        let total = u32::from(self.exhaustion_milli) + amount_milli;
+        let depletion_cycles = total / threshold;
+        self.exhaustion_milli = (total % threshold) as u16;
+
+        let saturation_cycles = (u32::from(self.saturation_milli) + 999) / 1_000;
+        let spent_saturation = depletion_cycles.min(saturation_cycles);
+        self.saturation_milli = self
+            .saturation_milli
+            .saturating_sub((spent_saturation * 1_000) as u16);
+
+        let food_cycles = depletion_cycles - spent_saturation;
+        let consumed_food = food_cycles.min(u32::from(self.food_level)) as u8;
+        self.food_level -= consumed_food;
+        consumed_food
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct DamageOutcome {
@@ -123,5 +201,35 @@ mod tests {
         vitals.respawn();
         assert_eq!(vitals.health(), MAX_HEALTH);
         assert!(!vitals.is_dead());
+    }
+
+    #[test]
+    fn food_state_preserves_fixed_point_exhaustion_and_spends_saturation_first() {
+        let mut food = FoodState::default();
+        assert_eq!(food.apply_exhaustion(2_500), 0);
+        assert_eq!(food.exhaustion_milli(), 2_500);
+        assert_eq!(food.apply_exhaustion(1_500), 0);
+        assert_eq!(food.saturation_milli(), 19_000);
+        assert_eq!(food.exhaustion_milli(), 0);
+        assert_eq!(food.food_level(), 20);
+
+        let mut empty_saturation = FoodState::from_saved(3, 0, 3_500).unwrap();
+        assert_eq!(empty_saturation.apply_exhaustion(8_500), 3);
+        assert_eq!(empty_saturation.food_level(), 0);
+        assert_eq!(empty_saturation.exhaustion_milli(), 0);
+    }
+
+    #[test]
+    fn food_state_rejects_out_of_range_or_inconsistent_saved_values() {
+        assert_eq!(
+            FoodState::from_saved(20, 20_000, 3_999),
+            Some(FoodState {
+                exhaustion_milli: 3_999,
+                ..FoodState::default()
+            })
+        );
+        assert!(FoodState::from_saved(21, 0, 0).is_none());
+        assert!(FoodState::from_saved(10, 10_001, 0).is_none());
+        assert!(FoodState::from_saved(1, 1_000, 4_000).is_none());
     }
 }

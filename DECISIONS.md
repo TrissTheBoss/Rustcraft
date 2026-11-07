@@ -133,3 +133,7 @@ Chunk persistence reads and writes the existing contiguous block array directly,
 ## 2026-11-07 — Persist the keepInventory world rule
 
 Save format v8 adds one boolean world rule, keepInventory. New worlds default it to false; the native world creation/edit form can set or change it, and copies preserve it. A true setting keeps player inventory on death; false uses the transactional drop behavior. Formats v1-v7 migrate with false. This is one isolated gamerule only: no gamerule command system or complete rule catalog exists, and the behavior still needs runtime comparison against the pinned Java Edition baseline before a parity claim.
+
+## 2026-11-07 — Persist provisional hunger state
+
+Save format v9 stores a bounded 0–20 food level plus fixed-point saturation and pending exhaustion. Versions v1-v8 load with the current full-state defaults. The native HUD shows ten hunger icons in Survival/Adventure. This state and the standalone exhaustion accumulator are not yet connected to movement, food items, healing, or starvation. Mojang's [health guide](https://www.minecraft.net/en-us/article/health-minecraft) documents ten drumsticks, activity-related hunger loss, and health regeneration at nine or more drumsticks; it does not specify tick formulas or fully identify a 26.3-specific behavior profile. Exhaustion thresholds, food defaults/migration, saturation math, and death/respawn food state are therefore prototype choices pending captured black-box fixtures for the pinned release.

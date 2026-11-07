@@ -18,7 +18,8 @@ const SAVE_MAGIC_V5: &[u8; 8] = b"VXSAVE05";
 const SAVE_MAGIC_V6: &[u8; 8] = b"VXSAVE06";
 const SAVE_MAGIC_V7: &[u8; 8] = b"VXSAVE07";
 const SAVE_MAGIC_V8: &[u8; 8] = b"VXSAVE08";
-const SAVE_VERSION: u32 = 8;
+const SAVE_MAGIC_V9: &[u8; 8] = b"VXSAVE09";
+const SAVE_VERSION: u32 = 9;
 const SAVE_FILE: &str = "world.vxs";
 const BACKUP_DIR: &str = "backups";
 const MAX_NAME_BYTES: usize = 128;
@@ -106,6 +107,7 @@ pub struct PlayerSnapshot {
     pub health: u8,
     pub fall_distance: f64,
     pub fall_damage_armed: bool,
+    pub food: crate::survival::FoodState,
     pub selected_block: BlockId,
     pub inventory: Inventory,
     pub drops: ItemDrops,
@@ -123,6 +125,7 @@ impl Default for PlayerSnapshot {
             health: crate::survival::MAX_HEALTH,
             fall_distance: 0.0,
             fall_damage_armed: false,
+            food: crate::survival::FoodState::default(),
             selected_block: BlockId(1),
             inventory: Inventory::default(),
             drops: ItemDrops::default(),
@@ -864,6 +867,12 @@ fn validate_player(player: &PlayerSnapshot) -> io::Result<()> {
         || !player.pitch.is_finite()
         || player.pitch.abs() > std::f32::consts::FRAC_PI_2
         || player.health > crate::survival::MAX_HEALTH
+        || crate::survival::FoodState::from_saved(
+            player.food.food_level(),
+            player.food.saturation_milli(),
+            player.food.exhaustion_milli(),
+        )
+        .is_none()
         || !player.fall_distance.is_finite()
         || !(0.0..=1024.0).contains(&player.fall_distance)
     {
@@ -894,7 +903,7 @@ fn encode_save(
     let world_len = u64::try_from(world_bytes.len())
         .map_err(|_| invalid_input("world payload length is invalid"))?;
     let mut output = Vec::with_capacity(world_bytes.len() + 96 + name.len());
-    output.write_all(SAVE_MAGIC_V8)?;
+    output.write_all(SAVE_MAGIC_V9)?;
     output.write_all(&SAVE_VERSION.to_le_bytes())?;
     output.write_all(&name_len.to_le_bytes())?;
     output.write_all(name)?;
@@ -919,6 +928,13 @@ fn encode_save(
     output.write_all(&[player.health])?;
     output.write_all(&player.fall_distance.to_le_bytes())?;
     output.write_all(&[u8::from(player.fall_damage_armed)])?;
+    output.write_all(&[
+        player.food.food_level(),
+        (player.food.saturation_milli() & 0xff) as u8,
+        (player.food.saturation_milli() >> 8) as u8,
+        (player.food.exhaustion_milli() & 0xff) as u8,
+        (player.food.exhaustion_milli() >> 8) as u8,
+    ])?;
     output.write_all(&world_len.to_le_bytes())?;
     output.write_all(world_bytes)?;
     output.write_all(&checksum64(&output).to_le_bytes())?;
@@ -962,6 +978,14 @@ fn decode_save(bytes: &[u8], id: &str) -> io::Result<StoredWorld> {
         player.health = read_byte(&mut input)?;
         player.fall_distance = read_f64(&mut input)?;
         player.fall_damage_armed = read_bool(&mut input)?;
+    }
+    if version >= 9 {
+        let food_level = read_byte(&mut input)?;
+        let saturation_milli = read_u16(&mut input)?;
+        let exhaustion_milli = read_u16(&mut input)?;
+        player.food =
+            crate::survival::FoodState::from_saved(food_level, saturation_milli, exhaustion_milli)
+                .ok_or_else(|| invalid_data("invalid saved hunger state"))?;
     }
     validate_player(&player).map_err(|_| invalid_data("invalid player snapshot values"))?;
     let world_len = read_u64(&mut input)?;
@@ -1017,6 +1041,7 @@ fn read_metadata<R: Read>(input: &mut R, id: &str) -> io::Result<(WorldMetadata,
         6 => &magic == SAVE_MAGIC_V6,
         7 => &magic == SAVE_MAGIC_V7,
         8 => &magic == SAVE_MAGIC_V8,
+        9 => &magic == SAVE_MAGIC_V9,
         _ => false,
     };
     if !version_matches_magic {
@@ -1424,6 +1449,7 @@ mod tests {
         world_bytes: &[u8],
     ) -> Vec<u8> {
         let mut v5 = encode_save(metadata, player, world_bytes).unwrap();
+        remove_v9_food_state(&mut v5);
         let world_start = v5
             .windows(world_bytes.len())
             .position(|window| window == world_bytes)
@@ -1457,6 +1483,7 @@ mod tests {
         world_bytes: &[u8],
     ) -> Vec<u8> {
         let mut v6 = encode_save(metadata, player, world_bytes).unwrap();
+        remove_v9_food_state(&mut v6);
         let world_start = v6
             .windows(world_bytes.len())
             .position(|window| window == world_bytes)
@@ -1477,6 +1504,7 @@ mod tests {
         world_bytes: &[u8],
     ) -> Vec<u8> {
         let mut v7 = encode_save(metadata, player, world_bytes).unwrap();
+        remove_v9_food_state(&mut v7);
         remove_v8_keep_inventory(&mut v7);
         v7[..8].copy_from_slice(SAVE_MAGIC_V7);
         v7[8..12].copy_from_slice(&7u32.to_le_bytes());
@@ -1484,10 +1512,32 @@ mod tests {
         v7
     }
 
+    fn encode_v8_fixture(
+        metadata: &WorldMetadata,
+        player: PlayerSnapshot,
+        world_bytes: &[u8],
+    ) -> Vec<u8> {
+        let mut v8 = encode_save(metadata, player, world_bytes).unwrap();
+        remove_v9_food_state(&mut v8);
+        v8[..8].copy_from_slice(SAVE_MAGIC_V8);
+        v8[8..12].copy_from_slice(&8u32.to_le_bytes());
+        refresh_fixture_checksum(&mut v8);
+        v8
+    }
+
     fn remove_v8_keep_inventory(bytes: &mut Vec<u8>) {
         let name_len = u16::from_le_bytes([bytes[12], bytes[13]]) as usize;
         let keep_inventory_offset = 14 + name_len + 39;
         bytes.drain(keep_inventory_offset..keep_inventory_offset + 1);
+        refresh_fixture_checksum(bytes);
+    }
+
+    fn remove_v9_food_state(bytes: &mut Vec<u8>) {
+        let world_start = bytes
+            .windows(8)
+            .position(|window| window == b"VOXEL04\0")
+            .expect("encoded world payload is present");
+        bytes.drain(world_start - 13..world_start - 8);
         refresh_fixture_checksum(bytes);
     }
 
@@ -1535,6 +1585,7 @@ mod tests {
             health: 7,
             fall_distance: 4.5,
             fall_damage_armed: true,
+            food: crate::survival::FoodState::from_saved(13, 6_500, 2_250).unwrap(),
             selected_block: BlockId(3),
             inventory,
             drops,
@@ -1725,13 +1776,13 @@ mod tests {
             .unwrap();
 
         let upgraded = read_bounded(&save_path).unwrap();
-        assert_eq!(&upgraded[..8], SAVE_MAGIC_V8);
-        assert_eq!(u32::from_le_bytes(upgraded[8..12].try_into().unwrap()), 8);
+        assert_eq!(&upgraded[..8], SAVE_MAGIC_V9);
+        assert_eq!(u32::from_le_bytes(upgraded[8..12].try_into().unwrap()), 9);
         assert_eq!(store.load(&created.metadata.id).unwrap(), loaded);
     }
 
     #[test]
-    fn version_two_worlds_load_with_empty_player_items_and_upgrade_to_version_eight() {
+    fn version_two_worlds_load_with_empty_player_items_and_upgrade_to_version_nine() {
         let root = TestRoot::new();
         let store = WorldStore::new(&root.0);
         let created = store
@@ -1757,8 +1808,8 @@ mod tests {
             .unwrap();
 
         let upgraded = read_bounded(&save_path).unwrap();
-        assert_eq!(&upgraded[..8], SAVE_MAGIC_V8);
-        assert_eq!(u32::from_le_bytes(upgraded[8..12].try_into().unwrap()), 8);
+        assert_eq!(&upgraded[..8], SAVE_MAGIC_V9);
+        assert_eq!(u32::from_le_bytes(upgraded[8..12].try_into().unwrap()), 9);
         assert_eq!(store.load(&created.metadata.id).unwrap(), loaded);
     }
 
@@ -1800,7 +1851,7 @@ mod tests {
             .save(&mut loaded.metadata, &loaded.world, loaded.player.clone())
             .unwrap();
         let upgraded = read_bounded(&save_path).unwrap();
-        assert_eq!(&upgraded[..8], SAVE_MAGIC_V8);
+        assert_eq!(&upgraded[..8], SAVE_MAGIC_V9);
         assert_eq!(store.load(&created.metadata.id).unwrap(), loaded);
     }
 
@@ -1854,12 +1905,12 @@ mod tests {
             .unwrap();
 
         let upgraded = read_bounded(&save_path).unwrap();
-        assert_eq!(&upgraded[..8], SAVE_MAGIC_V8);
+        assert_eq!(&upgraded[..8], SAVE_MAGIC_V9);
         assert_eq!(store.load(&created.metadata.id).unwrap(), loaded);
     }
 
     #[test]
-    fn version_six_worlds_receive_default_survival_state_and_upgrade_to_eight() {
+    fn version_six_worlds_receive_default_survival_state_and_upgrade_to_nine() {
         let root = TestRoot::new();
         let store = WorldStore::new(&root.0);
         let created = store
@@ -1885,7 +1936,7 @@ mod tests {
             .save(&mut loaded.metadata, &loaded.world, loaded.player.clone())
             .unwrap();
         let upgraded = read_bounded(&path).unwrap();
-        assert_eq!(&upgraded[..8], SAVE_MAGIC_V8);
+        assert_eq!(&upgraded[..8], SAVE_MAGIC_V9);
         assert_eq!(store.load(&created.metadata.id).unwrap(), loaded);
     }
 
@@ -1914,8 +1965,38 @@ mod tests {
             .save(&mut loaded.metadata, &loaded.world, loaded.player.clone())
             .unwrap();
         let upgraded = read_bounded(&path).unwrap();
-        assert_eq!(&upgraded[..8], SAVE_MAGIC_V8);
+        assert_eq!(&upgraded[..8], SAVE_MAGIC_V9);
         assert_eq!(store.load(&created.metadata.id).unwrap(), loaded);
+    }
+
+    #[test]
+    fn version_eight_worlds_migrate_with_default_food_state() {
+        let root = TestRoot::new();
+        let store = WorldStore::new(&root.0);
+        let mut player = PlayerSnapshot::default();
+        player.food = crate::survival::FoodState::from_saved(8, 2_000, 3_000).unwrap();
+        let created = store
+            .create(
+                "Version Eight World",
+                45,
+                StoredGameMode::Survival,
+                test_world(),
+                player,
+            )
+            .unwrap();
+        let mut world_bytes = Vec::new();
+        created.world.save(&mut world_bytes).unwrap();
+        let legacy = encode_v8_fixture(&created.metadata, created.player, &world_bytes);
+        let path = store.save_path(&created.metadata.id).unwrap();
+        atomic_write(&path, &legacy).unwrap();
+
+        let mut loaded = store.load(&created.metadata.id).unwrap();
+        assert_eq!(loaded.player.food, crate::survival::FoodState::default());
+        assert!(!loaded.metadata.keep_inventory);
+        store
+            .save(&mut loaded.metadata, &loaded.world, loaded.player.clone())
+            .unwrap();
+        assert_eq!(&read_bounded(&path).unwrap()[..8], SAVE_MAGIC_V9);
     }
 
     #[test]
@@ -2529,6 +2610,34 @@ mod tests {
         let mut trailing = bytes;
         trailing.push(0);
         assert!(decode_save(&trailing, &saved.metadata.id).is_err());
+    }
+
+    #[test]
+    fn decoder_rejects_invalid_food_state_even_with_a_valid_checksum() {
+        let root = TestRoot::new();
+        let store = WorldStore::new(&root.0);
+        let saved = store
+            .create(
+                "Invalid Food Test",
+                1,
+                StoredGameMode::Survival,
+                test_world(),
+                PlayerSnapshot::default(),
+            )
+            .unwrap();
+        let mut bytes = fs::read(store.save_path(&saved.metadata.id).unwrap()).unwrap();
+        let mut world_bytes = Vec::new();
+        saved.world.save(&mut world_bytes).unwrap();
+        let world_start = bytes
+            .windows(world_bytes.len())
+            .position(|window| window == world_bytes)
+            .unwrap();
+        bytes[world_start - 13] = crate::survival::MAX_FOOD_LEVEL + 1;
+        refresh_fixture_checksum(&mut bytes);
+        assert_eq!(
+            decode_save(&bytes, &saved.metadata.id).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
     }
 
     #[test]

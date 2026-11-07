@@ -352,6 +352,7 @@ struct AppState {
     settings_store: Option<SettingsStore>,
     player: PlayerController,
     vitals: PlayerVitals,
+    food: crate::survival::FoodState,
     gpu: Option<GpuRenderer>,
     last_physics: Instant,
     selected_block: crate::world::BlockId,
@@ -2474,7 +2475,7 @@ unsafe fn handle_death_command(window: Hwnd, command: usize) -> bool {
 
 #[allow(static_mut_refs)]
 unsafe fn respawn_player(window: Hwnd) {
-    let previous_player = APP.as_ref().map(|app| (app.player, app.vitals));
+    let previous_player = APP.as_ref().map(|app| (app.player, app.vitals, app.food));
     let previous_scene_dirty = SCENE.as_ref().is_some_and(|scene| scene.dirty);
     let result = (|| {
         let (Some(app), Some(scene)) = (APP.as_mut(), SCENE.as_mut()) else {
@@ -2509,9 +2510,10 @@ unsafe fn respawn_player(window: Hwnd) {
         persist_world(app, scene).map_err(|error| error.to_string())
     })();
     if let Err(error) = result {
-        if let (Some((player, vitals)), Some(app)) = (previous_player, APP.as_mut()) {
+        if let (Some((player, vitals, food)), Some(app)) = (previous_player, APP.as_mut()) {
             app.player = player;
             app.vitals = vitals;
+            app.food = food;
         }
         if let Some(scene) = SCENE.as_mut() {
             scene.dirty = previous_scene_dirty;
@@ -3682,8 +3684,8 @@ fn optional_seed(text: &str) -> Result<u64, ()> {
 #[cfg(test)]
 mod world_creation_tests {
     use super::{
-        build_scene, health_pips, hotbar_slot_after_scroll, inventory_slot, is_initial_keydown,
-        key_for, matching_creative_blocks, optional_seed, player_controller,
+        build_scene, food_pips, health_pips, hotbar_slot_after_scroll, inventory_slot,
+        is_initial_keydown, key_for, matching_creative_blocks, optional_seed, player_controller,
         prototype_block_for_item, stored_game_mode, GameMode, InventorySlot, StoredGameMode,
     };
     use crate::inventory::{ItemId, ItemKey};
@@ -3788,6 +3790,14 @@ mod world_creation_tests {
         assert_eq!(health_pips(7), [2, 2, 2, 1, 0, 0, 0, 0, 0, 0]);
         assert_eq!(health_pips(0), [0; 10]);
         assert_eq!(health_pips(255), [2; 10]);
+    }
+
+    #[test]
+    fn hunger_hud_pips_show_full_half_and_empty_food() {
+        assert_eq!(food_pips(20), [2; 10]);
+        assert_eq!(food_pips(7), [2, 2, 2, 1, 0, 0, 0, 0, 0, 0]);
+        assert_eq!(food_pips(0), [0; 10]);
+        assert_eq!(food_pips(255), [2; 10]);
     }
 
     #[test]
@@ -4438,6 +4448,7 @@ unsafe fn activate_world(window: Hwnd, app: &mut AppState, saved: crate::world_s
     let keep_inventory = saved.metadata.keep_inventory;
     app.player = player_controller(&saved.player, saved.metadata.game_mode);
     app.vitals = PlayerVitals::from_saved_health(saved.player.health).unwrap_or_default();
+    app.food = saved.player.food;
     app.death_items_retained = false;
     app.selected_block = saved.player.selected_block;
     app.inventory = saved.player.inventory;
@@ -4671,6 +4682,7 @@ pub fn run(logger: Option<Logger>) {
             last_save: Instant::now(),
             player,
             vitals: PlayerVitals::from_saved_health(initial_player.health).unwrap_or_default(),
+            food: initial_player.food,
         });
         if let Some(app) = APP.as_ref() {
             app.logger.event(
@@ -5231,6 +5243,7 @@ fn current_player_snapshot(app: &AppState) -> PlayerSnapshot {
         health: app.vitals.health(),
         fall_distance: app.player.fall_distance,
         fall_damage_armed: app.player.fall_damage_armed,
+        food: app.food,
     }
 }
 
@@ -5423,6 +5436,58 @@ unsafe fn paint_hud(hdc: Hdc, client: Rect, app: &AppState, scene: &Scene) {
                 );
             }
         }
+        let food_label = wide(&format!(
+            "Hunger: {}/{}",
+            app.food.food_level(),
+            crate::survival::MAX_FOOD_LEVEL
+        ));
+        let mut food_rect = Rect {
+            left: 18,
+            top: strip_top - 69,
+            right: 180,
+            bottom: strip_top - 48,
+        };
+        DrawTextW(
+            hdc,
+            food_label.as_ptr(),
+            -1,
+            &mut food_rect,
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+        );
+        for (drumstick, value) in food_pips(app.food.food_level()).into_iter().enumerate() {
+            let left = start_x + drumstick as i32 * 19;
+            let top = strip_top - 42;
+            let rect = Rect {
+                left,
+                top,
+                right: left + 16,
+                bottom: top + 12,
+            };
+            fill_hud_rect(hdc, rect, rgb(45, 37, 25));
+            if value >= 2 {
+                fill_hud_rect(
+                    hdc,
+                    Rect {
+                        left: left + 2,
+                        top: top + 2,
+                        right: left + 14,
+                        bottom: top + 10,
+                    },
+                    rgb(223, 154, 54),
+                );
+            } else if value == 1 {
+                fill_hud_rect(
+                    hdc,
+                    Rect {
+                        left: left + 2,
+                        top: top + 2,
+                        right: left + 8,
+                        bottom: top + 10,
+                    },
+                    rgb(223, 154, 54),
+                );
+            }
+        }
     }
 
     let selected = usize::from(app.inventory.selected_hotbar());
@@ -5535,6 +5600,15 @@ fn health_pips(health: u8) -> [u8; 10] {
     std::array::from_fn(|index| {
         health
             .min(crate::survival::MAX_HEALTH)
+            .saturating_sub((index * 2) as u8)
+            .min(2)
+    })
+}
+
+fn food_pips(food_level: u8) -> [u8; 10] {
+    std::array::from_fn(|index| {
+        food_level
+            .min(crate::survival::MAX_FOOD_LEVEL)
             .saturating_sub((index * 2) as u8)
             .min(2)
     })
