@@ -230,6 +230,28 @@ impl Inventory {
         self.main[self.selected_hotbar as usize]
     }
 
+    /// Move every held/equipped stack into world drops as one transaction.
+    /// The inventory and world-drop store remain unchanged if any stack
+    /// cannot be validated or the world has no capacity.
+    pub fn drop_all(
+        &mut self,
+        drops: &mut ItemDrops,
+        position: [f64; 3],
+        pickup_delay_ticks: u16,
+        catalog: &ItemCatalog,
+    ) -> Result<usize, DropError> {
+        let mut staged_drops = drops.clone();
+        let stacks: Vec<_> = self.saved_slots().into_iter().flatten().collect();
+        for stack in &stacks {
+            staged_drops.spawn(*stack, position, pickup_delay_ticks, catalog)?;
+        }
+        let selected_hotbar = self.selected_hotbar;
+        *self = Self::default();
+        self.selected_hotbar = selected_hotbar;
+        *drops = staged_drops;
+        Ok(stacks.len())
+    }
+
     pub(crate) fn saved_slots(&self) -> [Option<ItemStack>; SAVED_SLOT_COUNT] {
         let mut slots = [None; SAVED_SLOT_COUNT];
         slots[..MAIN_SLOT_COUNT].copy_from_slice(&self.main);
@@ -675,6 +697,69 @@ mod tests {
 
     fn key(id: u16) -> ItemKey {
         ItemKey::new(ItemId(id))
+    }
+
+    #[test]
+    fn dropping_all_player_slots_moves_every_stack_and_preserves_hotbar_selection() {
+        let catalog = catalog();
+        let mut inventory = Inventory::default();
+        inventory.insert(key(1), 5, &catalog).unwrap();
+        inventory.insert(key(3), 1, &catalog).unwrap();
+        inventory
+            .transfer(
+                InventorySlot::Main(1),
+                InventorySlot::Armor(ArmorSlot::Head),
+                1,
+                &catalog,
+            )
+            .unwrap();
+        inventory.insert(key(2), 10, &catalog).unwrap();
+        inventory
+            .swap(InventorySlot::Main(1), InventorySlot::Offhand, &catalog)
+            .unwrap();
+        inventory.select_hotbar(4).unwrap();
+        let mut drops = ItemDrops::default();
+
+        assert_eq!(
+            inventory.drop_all(&mut drops, [1.0, 2.0, 3.0], 10, &catalog),
+            Ok(3)
+        );
+        assert!(inventory.count(key(1)) == 0);
+        assert!(inventory.count(key(2)) == 0);
+        assert!(inventory.count(key(3)) == 0);
+        assert_eq!(inventory.selected_hotbar(), 4);
+        assert_eq!(drops.len(), 3);
+        assert!(drops.iter().all(|item| item.position == [1.0, 2.0, 3.0]));
+    }
+
+    #[test]
+    fn failed_drop_all_keeps_inventory_and_existing_world_drops_unchanged() {
+        let catalog = catalog();
+        let mut inventory = Inventory::default();
+        inventory.insert(key(1), 7, &catalog).unwrap();
+        let before_inventory = inventory;
+        let mut drops = ItemDrops::default();
+        for _ in 0..crate::drops::MAX_DROPPED_ITEMS {
+            drops
+                .spawn(
+                    ItemStack {
+                        key: key(1),
+                        count: 1,
+                    },
+                    [0.0, 1.0, 0.0],
+                    0,
+                    &catalog,
+                )
+                .unwrap();
+        }
+        let before_drops = drops.clone();
+
+        assert_eq!(
+            inventory.drop_all(&mut drops, [2.0, 1.0, 0.0], 10, &catalog),
+            Err(DropError::Capacity)
+        );
+        assert_eq!(inventory, before_inventory);
+        assert_eq!(drops, before_drops);
     }
 
     #[test]

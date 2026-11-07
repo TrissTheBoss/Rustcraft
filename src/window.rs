@@ -360,6 +360,7 @@ struct AppState {
     item_catalog: ItemCatalog,
     loot_table: BlockLootTable,
     drops: ItemDrops,
+    death_items_retained: bool,
     mining_catalog: MiningCatalog,
     mining_session: MiningSession,
     breaking_held: bool,
@@ -715,6 +716,41 @@ unsafe extern "system" fn window_proc(
                                     }
                                 }
                                 if outcome.became_dead {
+                                    app.death_items_retained = false;
+                                    let position = [
+                                        app.player.transform.x,
+                                        app.player.transform.y,
+                                        app.player.transform.z,
+                                    ];
+                                    match app.inventory.drop_all(
+                                        &mut app.drops,
+                                        position,
+                                        ITEM_PICKUP_DELAY_TICKS,
+                                        &app.item_catalog,
+                                    ) {
+                                        Ok(stack_count) => {
+                                            if let Some(scene) = SCENE.as_mut() {
+                                                scene.dirty = true;
+                                                scene.drop_meshes = build_drop_meshes(&app.drops);
+                                                if let Some(gpu) = app.gpu.as_mut() {
+                                                    upload_scene_meshes(gpu, scene);
+                                                }
+                                            }
+                                            app.logger.event(
+                                                "INFO",
+                                                "death_inventory_dropped",
+                                                format!("stacks={stack_count}"),
+                                            );
+                                        }
+                                        Err(error) => {
+                                            app.death_items_retained = true;
+                                            app.logger.event(
+                                                "ERROR",
+                                                "death_inventory_drop_failed",
+                                                error.to_string(),
+                                            );
+                                        }
+                                    }
                                     PostMessageW(window, WM_APP_DEATH, 0, 0);
                                 }
                             }
@@ -2313,10 +2349,15 @@ unsafe fn open_death_form(window: Hwnd) {
         32,
         0,
     ));
+    let status_text = if APP.as_ref().is_some_and(|app| app.death_items_retained) {
+        "The world could not accept all drops. Your inventory is retained."
+    } else {
+        "Your inventory drops into the world. Respawn to continue."
+    };
     let status_label = create_form_control(
         window,
         "STATIC",
-        "Prototype death screen. Inventory is retained on respawn.",
+        status_text,
         0,
         left + 24,
         top + 50,
@@ -2365,6 +2406,7 @@ unsafe fn open_death_form(window: Hwnd) {
     if let Some(app) = APP.as_mut() {
         app.dialog_open = true;
         app.input.clear();
+        app.death_items_retained = false;
         app.breaking_held = false;
         app.mining_session.reset();
         app.cursor_locked = false;
@@ -4343,9 +4385,44 @@ unsafe fn activate_world(window: Hwnd, app: &mut AppState, saved: crate::world_s
     let player_position = saved.player.position;
     app.player = player_controller(&saved.player, saved.metadata.game_mode);
     app.vitals = PlayerVitals::from_saved_health(saved.player.health).unwrap_or_default();
+    app.death_items_retained = false;
     app.selected_block = saved.player.selected_block;
     app.inventory = saved.player.inventory;
     app.drops = saved.player.drops.clone();
+    let mut death_drops_created = false;
+    if app.vitals.is_dead()
+        && matches!(app.player.mode, GameMode::Survival | GameMode::Adventure)
+        && app.inventory.saved_slots().iter().any(Option::is_some)
+    {
+        let position = [
+            app.player.transform.x,
+            app.player.transform.y,
+            app.player.transform.z,
+        ];
+        match app.inventory.drop_all(
+            &mut app.drops,
+            position,
+            ITEM_PICKUP_DELAY_TICKS,
+            &app.item_catalog,
+        ) {
+            Ok(stack_count) => {
+                death_drops_created = stack_count > 0;
+                app.logger.event(
+                    "INFO",
+                    "legacy_death_inventory_dropped",
+                    format!("stacks={stack_count}"),
+                );
+            }
+            Err(error) => {
+                app.death_items_retained = true;
+                app.logger.event(
+                    "ERROR",
+                    "legacy_death_inventory_drop_failed",
+                    error.to_string(),
+                );
+            }
+        }
+    }
     app.yaw = saved.player.yaw;
     app.pitch = saved.player.pitch;
     app.world_metadata = Some(saved.metadata);
@@ -4379,6 +4456,7 @@ unsafe fn activate_world(window: Hwnd, app: &mut AppState, saved: crate::world_s
     }
     let mut scene = build_scene(world, terrain_generator, stream_center);
     scene.drop_meshes = build_drop_meshes(&app.drops);
+    scene.dirty = death_drops_created;
     if let Some(gpu) = app.gpu.as_mut() {
         upload_scene_meshes(gpu, &scene);
     } else {
@@ -4390,6 +4468,17 @@ unsafe fn activate_world(window: Hwnd, app: &mut AppState, saved: crate::world_s
         ));
     }
     SCENE = Some(scene);
+    if death_drops_created {
+        if let Some(scene) = SCENE.as_mut() {
+            if let Err(error) = persist_world(app, scene) {
+                app.logger.event(
+                    "ERROR",
+                    "death_inventory_migration_save_failed",
+                    error.to_string(),
+                );
+            }
+        }
+    }
     if TITLE_FORM.is_some() {
         close_title_form(window, true);
     }
@@ -4510,6 +4599,7 @@ pub fn run(logger: Option<Logger>) {
             item_catalog: prototype_item_catalog(),
             loot_table: BlockLootTable::prototype(),
             drops: initial_player.drops.clone(),
+            death_items_retained: false,
             mining_catalog: MiningCatalog::prototype(),
             mining_session: MiningSession::default(),
             breaking_held: false,
