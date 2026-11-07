@@ -6,7 +6,7 @@ Backup filenames contain a Unix timestamp and a process-wide numeric sequence. R
 
 ## 2026-11-07 - Persist sparse block states in world payload v3
 
-Chunks store only block-state overrides from their prototype defaults. Upper/lower slabs and snow-layer counts are validated, versioned, serialized, and applied to collision and ray selection; replacement resets to the new block default. Payload v1/v2 remains readable and derives known prototype defaults. The outer save envelope remains v6 because the inner world payload is separately versioned. The renderer now uses prototype state boxes, but reference visual models and independent selection shapes remain separate work; catalogs and complete reference behavior remain outstanding.
+Chunks store only block-state overrides from their prototype defaults. Upper/lower slabs and snow-layer counts are validated, versioned, serialized, and applied to collision and ray selection; replacement resets to the new block default. Payload v1/v2 remains readable and derives known prototype defaults. The outer save envelope remains v6 because the inner world payload is separately versioned. The renderer uses prototype visual boxes and removes shared/occluded partial faces; fence and pane collision, selection, and visual shapes are separate. Reference models, connection-dependent geometry, catalogs, and complete reference behavior remain outstanding.
 
 ## 2026-11-07 - Use block-local collision geometry for movement and targeting
 

@@ -3813,16 +3813,19 @@ fn build_chunk_mesh(
                 _ => false,
             }
         },
-        |x, y, z, block| {
+        |x, y, z| {
             let world_position = [
-                position.x * CHUNK_SIZE as i32 + x as i32,
-                position.y * CHUNK_SIZE as i32 + y as i32,
-                position.z * CHUNK_SIZE as i32 + z as i32,
+                position.x * CHUNK_SIZE as i32 + x,
+                position.y * CHUNK_SIZE as i32 + y,
+                position.z * CHUNK_SIZE as i32 + z,
             ];
-            world
-                .block_state_at(world_position)
-                .map(|state| registry.visual_boxes(block, state))
-                .unwrap_or_else(|| registry.definition(block).collision.boxes())
+            match (
+                world.block_at(world_position),
+                world.block_state_at(world_position),
+            ) {
+                (Some(block), Some(state)) => registry.visual_boxes(block, state),
+                _ => crate::blocks::VoxelShape::EMPTY.boxes(),
+            }
         },
     );
     for vertex in &mut mesh.vertices {

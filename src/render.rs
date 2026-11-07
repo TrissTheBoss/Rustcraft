@@ -537,15 +537,38 @@ pub fn greedy_mesh_chunk(chunk: &Chunk, mut is_solid: impl FnMut(i32, i32, i32) 
 pub fn mesh_chunk_with_shapes(
     chunk: &Chunk,
     mut is_full_cube: impl FnMut(i32, i32, i32) -> bool,
-    mut visual_boxes: impl FnMut(usize, usize, usize, BlockId) -> &'static [Aabb],
+    mut visual_boxes_at: impl FnMut(i32, i32, i32) -> &'static [Aabb],
 ) -> Mesh {
     let mut full_cubes = Chunk::empty();
+    let mut greedy_mask = vec![false; CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE];
     for y in 0..CHUNK_SIZE {
         for z in 0..CHUNK_SIZE {
             for x in 0..CHUNK_SIZE {
                 let block = chunk.get(x, y, z).unwrap();
-                if block != BlockId(0) && is_full_cube(x as i32, y as i32, z as i32) {
+                if block == BlockId(0) || !is_full_cube(x as i32, y as i32, z as i32) {
+                    continue;
+                }
+                let neighbor_offsets = [
+                    [1, 0, 0],
+                    [-1, 0, 0],
+                    [0, 1, 0],
+                    [0, -1, 0],
+                    [0, 0, 1],
+                    [0, 0, -1],
+                ];
+                let touches_partial_shape = neighbor_offsets.iter().any(|offset| {
+                    let neighbor = [
+                        x as i32 + offset[0],
+                        y as i32 + offset[1],
+                        z as i32 + offset[2],
+                    ];
+                    !is_full_cube(neighbor[0], neighbor[1], neighbor[2])
+                        && !visual_boxes_at(neighbor[0], neighbor[1], neighbor[2]).is_empty()
+                });
+                if !touches_partial_shape {
                     full_cubes.set(x, y, z, block).unwrap();
+                    let index = y * CHUNK_SIZE * CHUNK_SIZE + z * CHUNK_SIZE + x;
+                    greedy_mask[index] = true;
                 }
             }
         }
@@ -556,11 +579,21 @@ pub fn mesh_chunk_with_shapes(
         for z in 0..CHUNK_SIZE {
             for x in 0..CHUNK_SIZE {
                 let block = chunk.get(x, y, z).unwrap();
-                if block == BlockId(0) || is_full_cube(x as i32, y as i32, z as i32) {
+                let index = y * CHUNK_SIZE * CHUNK_SIZE + z * CHUNK_SIZE + x;
+                if block == BlockId(0) || greedy_mask[index] {
                     continue;
                 }
-                for bounds in visual_boxes(x, y, z, block) {
-                    append_shape_box(&mut mesh, block, [x, y, z], *bounds, &mut is_full_cube);
+                let own_boxes = visual_boxes_at(x as i32, y as i32, z as i32);
+                for (shape_index, bounds) in own_boxes.iter().copied().enumerate() {
+                    append_shape_box(
+                        &mut mesh,
+                        block,
+                        [x, y, z],
+                        own_boxes,
+                        shape_index,
+                        bounds,
+                        &mut visual_boxes_at,
+                    );
                 }
             }
         }
@@ -573,8 +606,10 @@ fn append_shape_box(
     mesh: &mut Mesh,
     block: BlockId,
     cell: [usize; 3],
+    own_boxes: &'static [Aabb],
+    own_shape_index: usize,
     bounds: Aabb,
-    is_full_cube: &mut impl FnMut(i32, i32, i32) -> bool,
+    visual_boxes_at: &mut impl FnMut(i32, i32, i32) -> &'static [Aabb],
 ) {
     let min = [
         bounds.min[0] as f32,
@@ -586,103 +621,166 @@ fn append_shape_box(
         bounds.max[1] as f32,
         bounds.max[2] as f32,
     ];
-    let faces: [([i32; 3], [f32; 3], [[f32; 3]; 4]); 6] = [
-        (
-            [1, 0, 0],
-            [1.0, 0.0, 0.0],
-            [
-                [max[0], min[1], min[2]],
-                [max[0], max[1], min[2]],
-                [max[0], max[1], max[2]],
-                [max[0], min[1], max[2]],
-            ],
-        ),
-        (
-            [-1, 0, 0],
-            [-1.0, 0.0, 0.0],
-            [
-                [min[0], min[1], max[2]],
-                [min[0], max[1], max[2]],
-                [min[0], max[1], min[2]],
-                [min[0], min[1], min[2]],
-            ],
-        ),
-        (
-            [0, 1, 0],
-            [0.0, 1.0, 0.0],
-            [
-                [min[0], max[1], max[2]],
-                [max[0], max[1], max[2]],
-                [max[0], max[1], min[2]],
-                [min[0], max[1], min[2]],
-            ],
-        ),
-        (
-            [0, -1, 0],
-            [0.0, -1.0, 0.0],
-            [
-                [min[0], min[1], min[2]],
-                [max[0], min[1], min[2]],
-                [max[0], min[1], max[2]],
-                [min[0], min[1], max[2]],
-            ],
-        ),
-        (
-            [0, 0, 1],
-            [0.0, 0.0, 1.0],
-            [
-                [max[0], min[1], max[2]],
-                [max[0], max[1], max[2]],
-                [min[0], max[1], max[2]],
-                [min[0], min[1], max[2]],
-            ],
-        ),
-        (
-            [0, 0, -1],
-            [0.0, 0.0, -1.0],
-            [
-                [min[0], min[1], min[2]],
-                [min[0], max[1], min[2]],
-                [max[0], max[1], min[2]],
-                [max[0], min[1], min[2]],
-            ],
-        ),
-    ];
-    let uv = [[0.0, 0.0], [0.0, 1.0], [1.0, 1.0], [1.0, 0.0]];
-    for (offset, normal, corners) in faces {
-        let on_cell_boundary = match offset {
-            [1, 0, 0] => max[0] == 1.0,
-            [-1, 0, 0] => min[0] == 0.0,
-            [0, 1, 0] => max[1] == 1.0,
-            [0, -1, 0] => min[1] == 0.0,
-            [0, 0, 1] => max[2] == 1.0,
-            _ => min[2] == 0.0,
-        };
-        let neighbor = [
-            cell[0] as i32 + offset[0],
-            cell[1] as i32 + offset[1],
-            cell[2] as i32 + offset[2],
-        ];
-        if on_cell_boundary && is_full_cube(neighbor[0], neighbor[1], neighbor[2]) {
+    for axis in 0..3 {
+        for sign in [-1, 1] {
+            let plane = cell[axis] as f32 + if sign > 0 { max[axis] } else { min[axis] };
+            let (u_axis, v_axis) = match axis {
+                0 => (2, 1),
+                1 => (0, 2),
+                _ => (0, 1),
+            };
+            let face_rect = [
+                cell[u_axis] as f32 + min[u_axis],
+                cell[u_axis] as f32 + max[u_axis],
+                cell[v_axis] as f32 + min[v_axis],
+                cell[v_axis] as f32 + max[v_axis],
+            ];
+            let mut occluders = Vec::new();
+            for owner_y in cell[1] as i32 - 1..=cell[1] as i32 + 1 {
+                for owner_z in cell[2] as i32 - 1..=cell[2] as i32 + 1 {
+                    for owner_x in cell[0] as i32 - 1..=cell[0] as i32 + 1 {
+                        let owner = [owner_x, owner_y, owner_z];
+                        let owner_boxes =
+                            if owner == [cell[0] as i32, cell[1] as i32, cell[2] as i32] {
+                                own_boxes
+                            } else {
+                                visual_boxes_at(owner_x, owner_y, owner_z)
+                            };
+                        for (other_index, other) in owner_boxes.iter().enumerate() {
+                            if owner == [cell[0] as i32, cell[1] as i32, cell[2] as i32]
+                                && other_index == own_shape_index
+                            {
+                                continue;
+                            }
+                            let other_min = [
+                                owner_x as f32 + other.min[0] as f32,
+                                owner_y as f32 + other.min[1] as f32,
+                                owner_z as f32 + other.min[2] as f32,
+                            ];
+                            let other_max = [
+                                owner_x as f32 + other.max[0] as f32,
+                                owner_y as f32 + other.max[1] as f32,
+                                owner_z as f32 + other.max[2] as f32,
+                            ];
+                            let crosses_outward = if sign > 0 {
+                                other_min[axis] <= plane + 1.0e-6
+                                    && other_max[axis] > plane + 1.0e-6
+                            } else {
+                                other_max[axis] >= plane - 1.0e-6
+                                    && other_min[axis] < plane - 1.0e-6
+                            };
+                            if !crosses_outward {
+                                continue;
+                            }
+                            let overlap = [
+                                face_rect[0].max(other_min[u_axis]),
+                                face_rect[1].min(other_max[u_axis]),
+                                face_rect[2].max(other_min[v_axis]),
+                                face_rect[3].min(other_max[v_axis]),
+                            ];
+                            if overlap[0] < overlap[1] && overlap[2] < overlap[3] {
+                                occluders.push(overlap);
+                            }
+                        }
+                    }
+                }
+            }
+            for rect in exposed_face_rectangles(face_rect, &occluders) {
+                append_face_rect(mesh, block, axis, sign, plane, rect);
+            }
+        }
+    }
+}
+
+fn exposed_face_rectangles(rect: [f32; 4], occluders: &[[f32; 4]]) -> Vec<[f32; 4]> {
+    let mut u_cuts = vec![rect[0], rect[1]];
+    let mut v_cuts = vec![rect[2], rect[3]];
+    for cover in occluders {
+        u_cuts.extend([cover[0], cover[1]]);
+        v_cuts.extend([cover[2], cover[3]]);
+    }
+    u_cuts.sort_by(f32::total_cmp);
+    v_cuts.sort_by(f32::total_cmp);
+    u_cuts.dedup_by(|first, second| (*first - *second).abs() <= 1.0e-6);
+    v_cuts.dedup_by(|first, second| (*first - *second).abs() <= 1.0e-6);
+
+    let mut exposed = Vec::new();
+    for u_pair in u_cuts.windows(2) {
+        let u0 = u_pair[0].max(rect[0]);
+        let u1 = u_pair[1].min(rect[1]);
+        if u0 >= u1 {
             continue;
         }
-        let first = mesh.vertices.len() as u32;
-        for index in 0..4 {
-            mesh.vertices.push(Vertex {
-                position: Vec3::new(
-                    cell[0] as f32 + corners[index][0],
-                    cell[1] as f32 + corners[index][1],
-                    cell[2] as f32 + corners[index][2],
-                ),
-                normal: Vec3::new(normal[0], normal[1], normal[2]),
-                block,
-                texture: None,
-                uv: uv[index],
-            });
+        for v_pair in v_cuts.windows(2) {
+            let v0 = v_pair[0].max(rect[2]);
+            let v1 = v_pair[1].min(rect[3]);
+            if v0 >= v1 {
+                continue;
+            }
+            let midpoint = [(u0 + u1) * 0.5, (v0 + v1) * 0.5];
+            if !occluders.iter().any(|cover| {
+                midpoint[0] > cover[0]
+                    && midpoint[0] < cover[1]
+                    && midpoint[1] > cover[2]
+                    && midpoint[1] < cover[3]
+            }) {
+                exposed.push([u0, u1, v0, v1]);
+            }
         }
-        mesh.indices
-            .extend_from_slice(&[first, first + 1, first + 2, first, first + 2, first + 3]);
     }
+    exposed
+}
+
+fn append_face_rect(
+    mesh: &mut Mesh,
+    block: BlockId,
+    axis: usize,
+    sign: i32,
+    plane: f32,
+    rect: [f32; 4],
+) {
+    let (u_axis, v_axis) = match axis {
+        0 => (2, 1),
+        1 => (0, 2),
+        _ => (0, 1),
+    };
+    let normal = match (axis, sign) {
+        (0, 1) => [1.0, 0.0, 0.0],
+        (0, -1) => [-1.0, 0.0, 0.0],
+        (1, 1) => [0.0, 1.0, 0.0],
+        (1, -1) => [0.0, -1.0, 0.0],
+        (2, 1) => [0.0, 0.0, 1.0],
+        _ => [0.0, 0.0, -1.0],
+    };
+    let point = |u: f32, v: f32| {
+        let mut position = [0.0; 3];
+        position[axis] = plane;
+        position[u_axis] = u;
+        position[v_axis] = v;
+        Vec3::new(position[0], position[1], position[2])
+    };
+    let [u0, u1, v0, v1] = rect;
+    let points = match (axis, sign) {
+        (0, 1) => [point(u0, v0), point(u0, v1), point(u1, v1), point(u1, v0)],
+        (0, -1) => [point(u1, v0), point(u1, v1), point(u0, v1), point(u0, v0)],
+        (1, 1) => [point(u0, v1), point(u1, v1), point(u1, v0), point(u0, v0)],
+        (1, -1) => [point(u0, v0), point(u1, v0), point(u1, v1), point(u0, v1)],
+        (2, 1) => [point(u1, v0), point(u1, v1), point(u0, v1), point(u0, v0)],
+        _ => [point(u0, v0), point(u0, v1), point(u1, v1), point(u1, v0)],
+    };
+    let uv = [[0.0, 0.0], [0.0, 1.0], [1.0, 1.0], [1.0, 0.0]];
+    let first = mesh.vertices.len() as u32;
+    for index in 0..4 {
+        mesh.vertices.push(Vertex {
+            position: points[index],
+            normal: Vec3::new(normal[0], normal[1], normal[2]),
+            block,
+            texture: None,
+            uv: uv[index],
+        });
+    }
+    mesh.indices
+        .extend_from_slice(&[first, first + 1, first + 2, first, first + 2, first + 3]);
 }
 
 fn face_cell(face: Face, layer: usize, u: usize, v: usize) -> (usize, usize, usize) {
@@ -1456,8 +1554,15 @@ mod tests {
         let mesh = mesh_chunk_with_shapes(
             &chunk,
             |_, _, _| false,
-            |x, y, z, block| {
-                let state = chunk.get_state(x, y, z).unwrap();
+            |x, y, z| {
+                if !(0..CHUNK_SIZE as i32).contains(&x)
+                    || !(0..CHUNK_SIZE as i32).contains(&y)
+                    || !(0..CHUNK_SIZE as i32).contains(&z)
+                {
+                    return crate::blocks::VoxelShape::EMPTY.boxes();
+                }
+                let block = chunk.get(x as usize, y as usize, z as usize).unwrap();
+                let state = chunk.get_state(x as usize, y as usize, z as usize).unwrap();
                 registry.visual_boxes(block, state)
             },
         );
@@ -1465,6 +1570,133 @@ mod tests {
         assert_eq!(mesh.triangle_count(), 24);
         assert_eq!(mesh.bounds_min, Vec3::new(1.0, 2.0, 3.0));
         assert_eq!(mesh.bounds_max, Vec3::new(4.0, 2.75, 4.0));
+    }
+
+    #[test]
+    fn shape_mesher_removes_shared_faces_between_equal_partial_blocks() {
+        let mut chunk = Chunk::empty();
+        chunk.set(0, 0, 0, BlockId(4)).unwrap();
+        chunk.set(1, 0, 0, BlockId(4)).unwrap();
+        let registry = crate::blocks::BlockRegistry::new();
+        let mesh = mesh_chunk_with_shapes(
+            &chunk,
+            |_, _, _| false,
+            |x, y, z| {
+                if !(0..CHUNK_SIZE as i32).contains(&x)
+                    || !(0..CHUNK_SIZE as i32).contains(&y)
+                    || !(0..CHUNK_SIZE as i32).contains(&z)
+                {
+                    return crate::blocks::VoxelShape::EMPTY.boxes();
+                }
+                let block = chunk.get(x as usize, y as usize, z as usize).unwrap();
+                registry.visual_boxes(
+                    block,
+                    chunk.get_state(x as usize, y as usize, z as usize).unwrap(),
+                )
+            },
+        );
+
+        assert_eq!(mesh.triangle_count(), 20);
+    }
+
+    #[test]
+    fn shape_mesher_splits_a_partial_face_at_the_occluder_edge() {
+        let mut chunk = Chunk::empty();
+        chunk.set(0, 0, 0, BlockId(6)).unwrap();
+        chunk.set(1, 0, 0, BlockId(6)).unwrap();
+        chunk
+            .set_state(
+                0,
+                0,
+                0,
+                crate::blocks::BlockState {
+                    kind: crate::blocks::BlockKind::Snow,
+                    upper: false,
+                    layers: 2,
+                },
+            )
+            .unwrap();
+        chunk
+            .set_state(
+                1,
+                0,
+                0,
+                crate::blocks::BlockState {
+                    kind: crate::blocks::BlockKind::Snow,
+                    upper: false,
+                    layers: 6,
+                },
+            )
+            .unwrap();
+        let registry = crate::blocks::BlockRegistry::new();
+        let mesh = mesh_chunk_with_shapes(
+            &chunk,
+            |_, _, _| false,
+            |x, y, z| {
+                if !(0..CHUNK_SIZE as i32).contains(&x)
+                    || !(0..CHUNK_SIZE as i32).contains(&y)
+                    || !(0..CHUNK_SIZE as i32).contains(&z)
+                {
+                    return crate::blocks::VoxelShape::EMPTY.boxes();
+                }
+                let block = chunk.get(x as usize, y as usize, z as usize).unwrap();
+                registry.visual_boxes(
+                    block,
+                    chunk.get_state(x as usize, y as usize, z as usize).unwrap(),
+                )
+            },
+        );
+
+        assert_eq!(mesh.triangle_count(), 22);
+    }
+
+    #[test]
+    fn shape_mesher_splits_full_cube_faces_around_partial_neighbors() {
+        let mut chunk = Chunk::empty();
+        chunk.set(0, 0, 0, BlockId(1)).unwrap();
+        chunk.set(1, 0, 0, BlockId(4)).unwrap();
+        let registry = crate::blocks::BlockRegistry::new();
+        let mesh = mesh_chunk_with_shapes(
+            &chunk,
+            |x, y, z| {
+                if !(0..CHUNK_SIZE as i32).contains(&x)
+                    || !(0..CHUNK_SIZE as i32).contains(&y)
+                    || !(0..CHUNK_SIZE as i32).contains(&z)
+                {
+                    return false;
+                }
+                let block = chunk.get(x as usize, y as usize, z as usize).unwrap();
+                registry.is_full_cube(
+                    block,
+                    chunk.get_state(x as usize, y as usize, z as usize).unwrap(),
+                )
+            },
+            |x, y, z| {
+                if !(0..CHUNK_SIZE as i32).contains(&x)
+                    || !(0..CHUNK_SIZE as i32).contains(&y)
+                    || !(0..CHUNK_SIZE as i32).contains(&z)
+                {
+                    return crate::blocks::VoxelShape::EMPTY.boxes();
+                }
+                let block = chunk.get(x as usize, y as usize, z as usize).unwrap();
+                registry.visual_boxes(
+                    block,
+                    chunk.get_state(x as usize, y as usize, z as usize).unwrap(),
+                )
+            },
+        );
+
+        let full_block_east_face: Vec<_> = mesh
+            .vertices
+            .iter()
+            .filter(|vertex| {
+                vertex.normal.x > 0.5 && (vertex.position.x - 1.0).abs() <= f32::EPSILON
+            })
+            .collect();
+        assert_eq!(full_block_east_face.len(), 4);
+        assert!(full_block_east_face
+            .iter()
+            .all(|vertex| vertex.position.y >= 0.5));
     }
 
     #[test]

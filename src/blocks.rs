@@ -41,6 +41,61 @@ const SNOW_SHAPES: [[Aabb; 1]; 8] = [
     }],
 ];
 
+const FENCE_VISUAL_SHAPES: [Aabb; 9] = [
+    Aabb {
+        min: [6.0 / 16.0, 0.0, 6.0 / 16.0],
+        max: [10.0 / 16.0, 1.5, 10.0 / 16.0],
+    },
+    Aabb {
+        min: [0.0, 6.0 / 16.0, 6.0 / 16.0],
+        max: [6.0 / 16.0, 9.0 / 16.0, 10.0 / 16.0],
+    },
+    Aabb {
+        min: [10.0 / 16.0, 6.0 / 16.0, 6.0 / 16.0],
+        max: [1.0, 9.0 / 16.0, 10.0 / 16.0],
+    },
+    Aabb {
+        min: [0.0, 12.0 / 16.0, 6.0 / 16.0],
+        max: [6.0 / 16.0, 15.0 / 16.0, 10.0 / 16.0],
+    },
+    Aabb {
+        min: [10.0 / 16.0, 12.0 / 16.0, 6.0 / 16.0],
+        max: [1.0, 15.0 / 16.0, 10.0 / 16.0],
+    },
+    Aabb {
+        min: [6.0 / 16.0, 6.0 / 16.0, 0.0],
+        max: [10.0 / 16.0, 9.0 / 16.0, 6.0 / 16.0],
+    },
+    Aabb {
+        min: [6.0 / 16.0, 6.0 / 16.0, 10.0 / 16.0],
+        max: [10.0 / 16.0, 9.0 / 16.0, 1.0],
+    },
+    Aabb {
+        min: [6.0 / 16.0, 12.0 / 16.0, 0.0],
+        max: [10.0 / 16.0, 15.0 / 16.0, 6.0 / 16.0],
+    },
+    Aabb {
+        min: [6.0 / 16.0, 12.0 / 16.0, 10.0 / 16.0],
+        max: [10.0 / 16.0, 15.0 / 16.0, 1.0],
+    },
+];
+
+const PANE_VISUAL_SHAPES: [Aabb; 2] = [
+    Aabb {
+        min: [7.0 / 16.0, 0.0, 0.0],
+        max: [9.0 / 16.0, 1.0, 1.0],
+    },
+    Aabb {
+        min: [0.0, 0.0, 7.0 / 16.0],
+        max: [1.0, 1.0, 9.0 / 16.0],
+    },
+];
+
+const FENCE_SELECTION: [Aabb; 1] = [Aabb {
+    min: [0.0, 0.0, 0.0],
+    max: [1.0, 1.5, 1.0],
+}];
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Aabb {
     pub min: [f64; 3],
@@ -76,9 +131,11 @@ impl Aabb {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct CollisionShape {
+pub struct VoxelShape {
     boxes: &'static [Aabb],
 }
+
+pub type CollisionShape = VoxelShape;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BlockKind {
@@ -96,8 +153,8 @@ pub enum BlockKind {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct BlockState {
     pub kind: BlockKind,
-    /// Slab/fence/pane orientation or variant flag. For slabs, `true` means
-    /// top slab; for fences/panes it is reserved for future connection data.
+    /// Slab orientation flag; `true` means top slab. Fence/pane connections
+    /// need a richer state representation than this prototype flag.
     pub upper: bool,
     /// Snow layer count, clamped to the Java block-state range 1..=8.
     pub layers: u8,
@@ -217,6 +274,22 @@ impl BlockState {
             }]),
         }
     }
+
+    pub const fn selection_shape(self) -> VoxelShape {
+        match self.kind {
+            BlockKind::Fence => VoxelShape::from_boxes(&FENCE_SELECTION),
+            BlockKind::Pane => VoxelShape::from_boxes(&PANE_VISUAL_SHAPES),
+            _ => self.shape(),
+        }
+    }
+
+    pub const fn visual_shape(self) -> VoxelShape {
+        match self.kind {
+            BlockKind::Fence => VoxelShape::from_boxes(&FENCE_VISUAL_SHAPES),
+            BlockKind::Pane => VoxelShape::from_boxes(&PANE_VISUAL_SHAPES),
+            _ => self.shape(),
+        }
+    }
 }
 
 pub const fn default_block_state(id: BlockId) -> BlockState {
@@ -266,7 +339,7 @@ pub const fn default_block_state(id: BlockId) -> BlockState {
     }
 }
 
-impl CollisionShape {
+impl VoxelShape {
     pub const EMPTY: Self = Self { boxes: &[] };
     pub const FULL_BLOCK: Self = Self {
         boxes: &[Aabb::FULL_BLOCK],
@@ -285,8 +358,23 @@ impl CollisionShape {
 pub struct BlockDefinition {
     pub id: BlockId,
     pub name: &'static str,
-    pub collision: CollisionShape,
+    pub collision: VoxelShape,
+    pub selection: VoxelShape,
+    pub visual: VoxelShape,
     pub opaque: bool,
+}
+
+impl BlockDefinition {
+    fn from_state(id: BlockId, name: &'static str, state: BlockState, opaque: bool) -> Self {
+        Self {
+            id,
+            name,
+            collision: state.shape(),
+            selection: state.selection_shape(),
+            visual: state.visual_shape(),
+            opaque,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -301,121 +389,29 @@ impl BlockRegistry {
     /// block. Unknown IDs intentionally use a conservative full cube so they
     /// cannot create accidental walk-through geometry.
     pub fn definition(&self, id: BlockId) -> BlockDefinition {
-        match id.0 {
-            0 => BlockDefinition {
-                id,
-                name: "air",
-                collision: CollisionShape::EMPTY,
-                opaque: false,
-            },
-            1 => BlockDefinition {
-                id,
-                name: "soil",
-                collision: CollisionShape::FULL_BLOCK,
-                opaque: true,
-            },
-            2 => BlockDefinition {
-                id,
-                name: "surface",
-                collision: CollisionShape::FULL_BLOCK,
-                opaque: true,
-            },
-            3 => BlockDefinition {
-                id,
-                name: "rock",
-                collision: CollisionShape::FULL_BLOCK,
-                opaque: true,
-            },
-            4 => BlockDefinition {
-                id,
-                name: "slab",
-                collision: BlockState {
-                    kind: BlockKind::Slab,
-                    upper: false,
-                    layers: 1,
-                }
-                .shape(),
-                opaque: true,
-            },
-            5 => BlockDefinition {
-                id,
-                name: "carpet",
-                collision: BlockState {
-                    kind: BlockKind::Carpet,
-                    upper: false,
-                    layers: 1,
-                }
-                .shape(),
-                opaque: false,
-            },
-            6 => BlockDefinition {
-                id,
-                name: "snow layer",
-                collision: BlockState {
-                    kind: BlockKind::Snow,
-                    upper: false,
-                    layers: 1,
-                }
-                .shape(),
-                opaque: false,
-            },
-            7 => BlockDefinition {
-                id,
-                name: "farmland",
-                collision: BlockState {
-                    kind: BlockKind::Farmland,
-                    upper: false,
-                    layers: 1,
-                }
-                .shape(),
-                opaque: true,
-            },
-            8 => BlockDefinition {
-                id,
-                name: "path",
-                collision: BlockState {
-                    kind: BlockKind::Path,
-                    upper: false,
-                    layers: 1,
-                }
-                .shape(),
-                opaque: true,
-            },
-            9 => BlockDefinition {
-                id,
-                name: "fence",
-                collision: BlockState {
-                    kind: BlockKind::Fence,
-                    upper: false,
-                    layers: 1,
-                }
-                .shape(),
-                opaque: false,
-            },
-            10 => BlockDefinition {
-                id,
-                name: "pane",
-                collision: BlockState {
-                    kind: BlockKind::Pane,
-                    upper: false,
-                    layers: 1,
-                }
-                .shape(),
-                opaque: false,
-            },
-            _ => BlockDefinition {
-                id,
-                name: "unknown",
-                collision: CollisionShape::FULL_BLOCK,
-                opaque: true,
-            },
-        }
+        let (name, opaque) = match id.0 {
+            0 => ("air", false),
+            1 => ("soil", true),
+            2 => ("surface", true),
+            3 => ("rock", true),
+            4 => ("slab", true),
+            5 => ("carpet", false),
+            6 => ("snow layer", false),
+            7 => ("farmland", true),
+            8 => ("path", true),
+            9 => ("fence", false),
+            10 => ("pane", false),
+            _ => ("unknown", true),
+        };
+        BlockDefinition::from_state(id, name, default_block_state(id), opaque)
     }
 
     pub fn definition_with_state(&self, id: BlockId, state: BlockState) -> BlockDefinition {
         let mut definition = self.definition(id);
         if state.is_valid() && state.kind == default_block_state(id).kind {
             definition.collision = state.shape();
+            definition.selection = state.selection_shape();
+            definition.visual = state.visual_shape();
         }
         definition
     }
@@ -424,27 +420,23 @@ impl BlockRegistry {
         self.definition_with_state(id, state).collision
     }
 
-    /// Selection currently follows collision geometry for this prototype
-    /// catalog. Keeping the query separate allows future definitions to diverge.
-    pub fn selection_shape(&self, id: BlockId, state: BlockState) -> CollisionShape {
-        self.collision_shape(id, state)
+    /// Prototype selection volume. Some blocks are deliberately targetable
+    /// outside their collision shape (for example, fences).
+    pub fn selection_shape(&self, id: BlockId, state: BlockState) -> VoxelShape {
+        self.definition_with_state(id, state).selection
     }
 
     /// Original prototype geometry for rendering. These simple shapes are not
     /// reference models; block families can provide independent model data later.
     pub fn visual_boxes(&self, id: BlockId, state: BlockState) -> &'static [Aabb] {
         if id.0 == 0 {
-            return CollisionShape::EMPTY.boxes();
+            return VoxelShape::EMPTY.boxes();
         }
-        if state.is_valid() && state.kind == default_block_state(id).kind {
-            state.shape().boxes()
-        } else {
-            self.definition(id).collision.boxes()
-        }
+        self.definition_with_state(id, state).visual.boxes()
     }
 
     pub fn is_full_cube(&self, id: BlockId, state: BlockState) -> bool {
-        id.0 != 0 && self.visual_boxes(id, state) == CollisionShape::FULL_BLOCK.boxes()
+        id.0 != 0 && self.visual_boxes(id, state) == VoxelShape::FULL_BLOCK.boxes()
     }
 
     pub fn is_solid(&self, id: BlockId) -> bool {
@@ -524,5 +516,19 @@ mod tests {
             registry.definition(BlockId(9)).collision.boxes()[0].max[1],
             1.5
         );
+    }
+
+    #[test]
+    fn prototype_visual_selection_and_collision_shapes_are_independent() {
+        let registry = BlockRegistry::new();
+        let fence = registry.definition(BlockId(9));
+        assert_eq!(fence.collision.boxes().len(), 1);
+        assert_eq!(fence.selection.boxes()[0].max, [1.0, 1.5, 1.0]);
+        assert_eq!(fence.visual.boxes().len(), 9);
+
+        let pane = registry.definition(BlockId(10));
+        assert_eq!(pane.collision.boxes().len(), 1);
+        assert_eq!(pane.selection.boxes().len(), 2);
+        assert_eq!(pane.visual.boxes().len(), 2);
     }
 }
