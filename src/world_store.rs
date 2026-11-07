@@ -265,9 +265,33 @@ impl WorldStore {
     }
 
     pub fn load(&self, id: &str) -> io::Result<StoredWorld> {
+        self.ensure_world_dir(id)?;
         let path = self.save_path(id)?;
         let bytes = read_bounded(&path)?;
         decode_save(&bytes, id)
+    }
+
+    pub fn rename(&self, id: &str, name: &str) -> io::Result<StoredWorld> {
+        let mut saved = self.load(id)?;
+        saved.metadata.name = validate_name(name)?;
+        self.save(&mut saved.metadata, &saved.world, saved.player)?;
+        Ok(saved)
+    }
+
+    pub fn copy(&self, id: &str, name: &str) -> io::Result<StoredWorld> {
+        let source = self.load(id)?;
+        self.create(
+            name,
+            source.metadata.seed,
+            source.metadata.game_mode,
+            source.world,
+            source.player,
+        )
+    }
+
+    pub fn delete(&self, id: &str) -> io::Result<()> {
+        let directory = self.ensure_world_dir(id)?;
+        fs::remove_dir_all(directory)
     }
 
     pub fn save(
@@ -282,22 +306,39 @@ impl WorldStore {
     }
 
     pub fn list_backups(&self, id: &str) -> io::Result<Vec<String>> {
-        let directory = self.world_dir(id)?.join(BACKUP_DIR);
+        let directory = self.ensure_world_dir(id)?.join(BACKUP_DIR);
+        match fs::symlink_metadata(&directory) {
+            Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
+            Ok(_) => return Err(invalid_data("backup path is not a real directory")),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(error),
+        }
         let entries = match fs::read_dir(directory) {
             Ok(entries) => entries,
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
             Err(error) => return Err(error),
         };
-        let mut backups = entries
-            .filter_map(Result::ok)
-            .filter_map(|entry| entry.file_name().to_str().map(str::to_owned))
-            .filter(|name| valid_backup_name(name))
-            .collect::<Vec<_>>();
+        let mut backups = Vec::new();
+        for entry in entries {
+            let entry = entry?;
+            if !entry.file_type()?.is_file() {
+                continue;
+            }
+            let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+                continue;
+            };
+            if valid_backup_name(&name) {
+                backups.push(name);
+            }
+        }
         backups.sort();
         Ok(backups)
     }
 
     pub fn restore_backup(&self, id: &str, backup_name: &str) -> io::Result<StoredWorld> {
+        let world_dir = self.ensure_world_dir(id)?;
+        let backup_dir = world_dir.join(BACKUP_DIR);
+        ensure_real_directory(&backup_dir)?;
         let backup_path = self
             .world_dir(id)?
             .join(BACKUP_DIR)
@@ -349,6 +390,7 @@ impl WorldStore {
         backup: bool,
     ) -> io::Result<()> {
         validate_player(player)?;
+        self.ensure_world_dir(&metadata.id)?;
         let path = self.save_path(&metadata.id)?;
         let mut world_bytes = Vec::new();
         world.save(&mut world_bytes)?;
@@ -377,15 +419,19 @@ impl WorldStore {
     }
 
     fn backup_current(&self, id: &str, save_path: &Path) -> io::Result<()> {
-        if !save_path.exists() {
-            return Ok(());
-        }
-        let metadata = fs::metadata(save_path)?;
+        self.ensure_world_dir(id)?;
+        let metadata = match fs::symlink_metadata(save_path) {
+            Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => metadata,
+            Ok(_) => return Err(invalid_data("existing save is not a regular file")),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error),
+        };
         if metadata.len() > MAX_SAVE_BYTES as u64 {
             return Err(invalid_data("existing save exceeds the backup size limit"));
         }
         let directory = self.world_dir(id)?.join(BACKUP_DIR);
         fs::create_dir_all(&directory)?;
+        ensure_real_directory(&directory)?;
         let counter = NEXT_FILE_ID.fetch_add(1, Ordering::Relaxed);
         let name = format!("backup-{}-{counter}.sav", unix_seconds()?);
         let backup = directory.join(name);
@@ -400,6 +446,21 @@ impl WorldStore {
 
     fn save_path(&self, id: &str) -> io::Result<PathBuf> {
         Ok(self.world_dir(id)?.join(SAVE_FILE))
+    }
+
+    fn ensure_world_dir(&self, id: &str) -> io::Result<PathBuf> {
+        let directory = self.world_dir(id)?;
+        ensure_real_directory(&directory)?;
+        Ok(directory)
+    }
+}
+
+fn ensure_real_directory(path: &Path) -> io::Result<()> {
+    let metadata = fs::symlink_metadata(path)?;
+    if metadata.is_dir() && !metadata.file_type().is_symlink() {
+        Ok(())
+    } else {
+        Err(invalid_data("world storage path is not a real directory"))
     }
 }
 
@@ -608,8 +669,12 @@ fn read_metadata<R: Read>(input: &mut R, id: &str) -> io::Result<WorldMetadata> 
 }
 
 fn read_bounded(path: &Path) -> io::Result<Vec<u8>> {
+    let metadata = fs::symlink_metadata(path)?;
+    if !metadata.is_file() || metadata.file_type().is_symlink() {
+        return Err(invalid_data("save path is not a regular file"));
+    }
     let file = File::open(path)?;
-    let length = file.metadata()?.len();
+    let length = metadata.len();
     if length > MAX_SAVE_BYTES as u64 {
         return Err(invalid_data("world save exceeds the current size limit"));
     }
@@ -928,6 +993,178 @@ mod tests {
         assert!(store
             .restore_backup(&saved.metadata.id, "..\\outside.sav")
             .is_err());
+    }
+
+    #[test]
+    fn rename_keeps_world_and_player_data_and_preserves_previous_snapshot() {
+        let root = TestRoot::new();
+        let store = WorldStore::new(&root.0);
+        let player = PlayerSnapshot {
+            position: [3.0, 12.0, -4.0],
+            selected_block: BlockId(3),
+            ..PlayerSnapshot::default()
+        };
+        let saved = store
+            .create(
+                "Before Rename",
+                81,
+                StoredGameMode::Survival,
+                test_world(),
+                player,
+            )
+            .unwrap();
+
+        let renamed = store.rename(&saved.metadata.id, "After Rename").unwrap();
+
+        assert_eq!(renamed.metadata.name, "After Rename");
+        assert_eq!(renamed.metadata.seed, saved.metadata.seed);
+        assert_eq!(renamed.player, player);
+        assert_eq!(renamed.world, saved.world);
+        assert_eq!(store.list_backups(&saved.metadata.id).unwrap().len(), 1);
+        assert_eq!(
+            store.load(&saved.metadata.id).unwrap().metadata.name,
+            "After Rename"
+        );
+    }
+
+    #[test]
+    fn copy_creates_independent_world_and_delete_removes_only_the_target() {
+        let root = TestRoot::new();
+        let store = WorldStore::new(&root.0);
+        let source = store
+            .create(
+                "Source",
+                19,
+                StoredGameMode::Creative,
+                test_world(),
+                PlayerSnapshot::default(),
+            )
+            .unwrap();
+        let copied = store.copy(&source.metadata.id, "Copy").unwrap();
+        assert_ne!(copied.metadata.id, source.metadata.id);
+        assert_eq!(copied.metadata.name, "Copy");
+        assert_eq!(copied.metadata.seed, source.metadata.seed);
+        assert_eq!(copied.world, source.world);
+
+        let mut edited_copy = store.load(&copied.metadata.id).unwrap();
+        edited_copy.world.set_block([-1, 1, 32], BlockId(3));
+        store
+            .save(
+                &mut edited_copy.metadata,
+                &edited_copy.world,
+                edited_copy.player,
+            )
+            .unwrap();
+        assert_eq!(
+            store
+                .load(&source.metadata.id)
+                .unwrap()
+                .world
+                .block_at([-1, 1, 32]),
+            Some(BlockId(0))
+        );
+        assert_eq!(
+            store
+                .load(&copied.metadata.id)
+                .unwrap()
+                .world
+                .block_at([-1, 1, 32]),
+            Some(BlockId(3))
+        );
+
+        store.delete(&source.metadata.id).unwrap();
+        assert!(store.load(&source.metadata.id).is_err());
+        assert_eq!(
+            store
+                .load(&copied.metadata.id)
+                .unwrap()
+                .world
+                .block_at([-1, 1, 32]),
+            Some(BlockId(3))
+        );
+    }
+
+    #[test]
+    fn non_directory_world_paths_and_non_file_saves_are_rejected() {
+        let root = TestRoot::new();
+        let store = WorldStore::new(&root.0);
+        fs::create_dir_all(&root.0).unwrap();
+        fs::write(root.0.join("world-1-4"), b"not a directory").unwrap();
+        assert_eq!(
+            store.load("world-1-4").unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+
+        fs::create_dir_all(root.0.join("world-1-5").join(SAVE_FILE)).unwrap();
+        assert_eq!(
+            store.load("world-1-5").unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+        assert!(store
+            .list()
+            .unwrap()
+            .iter()
+            .any(|entry| entry.id == "world-1-5" && entry.health == WorldHealth::Corrupt));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn world_symlinks_cannot_read_or_delete_data_outside_the_store() {
+        use std::os::unix::fs::symlink;
+
+        let root = TestRoot::new();
+        let store = WorldStore::new(&root.0);
+        let outside = root.0.with_file_name(format!(
+            "voxel-engine-world-outside-{}-{}",
+            std::process::id(),
+            NEXT_FILE_ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(&root.0).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join(SAVE_FILE), b"outside save").unwrap();
+        symlink(&outside, root.0.join("world-1-2")).unwrap();
+
+        assert_eq!(
+            store.load("world-1-2").unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+        assert_eq!(
+            store.delete("world-1-2").unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+        assert_eq!(fs::read(outside.join(SAVE_FILE)).unwrap(), b"outside save");
+        fs::remove_dir_all(outside).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn save_file_symlinks_are_reported_as_corrupt_without_following_them() {
+        use std::os::unix::fs::symlink;
+
+        let root = TestRoot::new();
+        let store = WorldStore::new(&root.0);
+        let outside = root.0.with_file_name(format!(
+            "voxel-engine-save-outside-{}-{}",
+            std::process::id(),
+            NEXT_FILE_ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(root.0.join("world-1-3")).unwrap();
+        fs::write(&outside, b"outside save").unwrap();
+        symlink(&outside, root.0.join("world-1-3").join(SAVE_FILE)).unwrap();
+
+        let entry = store
+            .list()
+            .unwrap()
+            .into_iter()
+            .find(|entry| entry.id == "world-1-3")
+            .unwrap();
+        assert_eq!(entry.health, WorldHealth::Corrupt);
+        assert_eq!(
+            store.load("world-1-3").unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+        assert_eq!(fs::read(&outside).unwrap(), b"outside save");
+        fs::remove_file(outside).unwrap();
     }
 
     #[test]

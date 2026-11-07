@@ -42,6 +42,10 @@ The Windows prototype uses an application-data world directory, a versioned sing
 
 The Windows prototype exposes save, create seeded Creative world, and open-ready-world actions through a native menu so persisted worlds can be exercised before a complete custom UI exists. Corrupt, missing, and newer-format worlds are displayed as unavailable; switching saves the current dirty world first and is blocked if that save fails. This bridge does not satisfy the PRD's world-management or menu design requirements; editing world options, deletion, backup recovery, pause behavior, and the styled cross-platform UI remain planned.
 
+## 2026-11-07 — Keep world management in the storage boundary
+
+World rename, copy, and delete operations belong to `WorldStore`, so UI actions share the same validation and save semantics. Rename preserves a prior snapshot, copies receive a new world ID while retaining source seed/mode/player/world data, and deletion validates the world directory before removing it. The prototype menu confirms deletion and disallows deleting the active world. Save and directory symlinks are rejected to prevent world operations from following paths outside the store.
+
 ## 2026-11-06 — Keep rendering core dependency-free until graphics dependencies are available
 
 Implement the renderer-facing contracts and CPU rasterizer using the standard library so meshing, camera math, texture resources, lighting, and profiling can be exercised offline. The window/GPU adapter remains pending; do not represent the rendering milestone as complete until an interactive surface and GPU presentation path are integrated and verified.

@@ -53,6 +53,12 @@ const MENU_SAVE_WORLD: usize = 1001;
 const MENU_CREATE_WORLD: usize = 1002;
 const MENU_QUIT: usize = 1003;
 const MENU_WORLD_BASE: usize = 2000;
+const MENU_COPY_WORLD_BASE: usize = 3000;
+const MENU_DELETE_WORLD_BASE: usize = 4000;
+const IDYES: i32 = 6;
+const MB_YESNO: u32 = 0x0004;
+const MB_ICONWARNING: u32 = 0x0030;
+const MB_DEFBUTTON2: u32 = 0x0100;
 const TICK_INTERVAL_MS: u32 = 50;
 const VK_ESCAPE: u32 = 0x1B;
 const WM_LBUTTONDOWN: u32 = 0x0201;
@@ -156,6 +162,7 @@ extern "system" {
     fn GetMenu(window: Hwnd) -> *mut c_void;
     fn DestroyMenu(menu: *mut c_void) -> i32;
     fn PostMessageW(window: Hwnd, message: u32, wparam: Wparam, lparam: Lparam) -> i32;
+    fn MessageBoxW(window: Hwnd, text: *const u16, caption: *const u16, flags: u32) -> i32;
     fn DrawMenuBar(window: Hwnd) -> i32;
     fn DestroyWindow(window: Hwnd) -> i32;
     fn ClipCursor(rect: *const Rect) -> i32;
@@ -253,6 +260,16 @@ unsafe extern "system" fn window_proc(
     match message {
         WM_COMMAND => {
             let command = wparam & 0xffff;
+            if (MENU_DELETE_WORLD_BASE..MENU_DELETE_WORLD_BASE + 500).contains(&command) {
+                let index = command - MENU_DELETE_WORLD_BASE;
+                if let Some(id) = APP
+                    .as_ref()
+                    .and_then(|app| app.menu_world_ids.get(index).cloned())
+                {
+                    delete_world_from_menu(window, &id);
+                }
+                return 0;
+            }
             if let Some(app) = APP.as_mut() {
                 match command {
                     MENU_SAVE_WORLD => {
@@ -279,9 +296,18 @@ unsafe extern "system" fn window_proc(
                         PostMessageW(window, WM_CLOSE, 0, 0);
                     }
                     selected if selected >= MENU_WORLD_BASE => {
-                        let index = selected - MENU_WORLD_BASE;
-                        if let Some(id) = app.menu_world_ids.get(index).cloned() {
-                            open_world_from_menu(window, app, &id);
+                        if (MENU_WORLD_BASE..MENU_WORLD_BASE + 500).contains(&selected) {
+                            let index = selected - MENU_WORLD_BASE;
+                            if let Some(id) = app.menu_world_ids.get(index).cloned() {
+                                open_world_from_menu(window, app, &id);
+                            }
+                        } else if (MENU_COPY_WORLD_BASE..MENU_COPY_WORLD_BASE + 500)
+                            .contains(&selected)
+                        {
+                            let index = selected - MENU_COPY_WORLD_BASE;
+                            if let Some(id) = app.menu_world_ids.get(index).cloned() {
+                                copy_world_from_menu(window, app, &id);
+                            }
                         }
                     }
                     _ => {}
@@ -690,14 +716,34 @@ unsafe fn build_main_menu(app: &mut AppState) -> *mut c_void {
                         crate::world_store::WorldHealth::UnsupportedVersion => " [Newer Version]",
                         crate::world_store::WorldHealth::MissingSave => " [Missing Save]",
                     };
+                    let world_menu = CreatePopupMenu();
+                    if world_menu.is_null() {
+                        continue;
+                    }
+                    let can_open = summary.health == crate::world_store::WorldHealth::Ready;
+                    let open = wide("Open");
+                    let copy = wide("Copy");
+                    let delete = wide("Delete...");
+                    AppendMenuW(
+                        world_menu,
+                        MF_STRING | if can_open { 0 } else { MF_GRAYED },
+                        MENU_WORLD_BASE + index,
+                        open.as_ptr(),
+                    );
+                    AppendMenuW(
+                        world_menu,
+                        MF_STRING | if can_open { 0 } else { MF_GRAYED },
+                        MENU_COPY_WORLD_BASE + index,
+                        copy.as_ptr(),
+                    );
+                    AppendMenuW(
+                        world_menu,
+                        MF_STRING,
+                        MENU_DELETE_WORLD_BASE + index,
+                        delete.as_ptr(),
+                    );
                     let label = wide(&format!("{name}{health}"));
-                    let flags = MF_STRING
-                        | if summary.health == crate::world_store::WorldHealth::Ready {
-                            0
-                        } else {
-                            MF_GRAYED
-                        };
-                    AppendMenuW(worlds_menu, flags, MENU_WORLD_BASE + index, label.as_ptr());
+                    AppendMenuW(worlds_menu, MF_POPUP, world_menu as usize, label.as_ptr());
                     app.menu_world_ids.push(id);
                 }
             }
@@ -789,6 +835,131 @@ unsafe fn create_world_from_menu(window: Hwnd, app: &mut AppState) {
         Err(error) => app
             .logger
             .event("ERROR", "world_create_failed", error.to_string()),
+    }
+}
+
+#[allow(static_mut_refs)]
+unsafe fn copy_world_from_menu(window: Hwnd, app: &mut AppState, id: &str) {
+    if app
+        .world_metadata
+        .as_ref()
+        .is_some_and(|active| active.id == id)
+    {
+        if let Some(scene) = SCENE.as_mut() {
+            if scene.dirty {
+                if let Err(error) = persist_world(app, scene) {
+                    app.logger.event(
+                        "ERROR",
+                        "world_copy_blocked_by_save_failure",
+                        error.to_string(),
+                    );
+                    return;
+                }
+            }
+        }
+    }
+    let Some(store) = app.world_store.clone() else {
+        app.logger.event(
+            "ERROR",
+            "world_copy_unavailable",
+            "world storage is unavailable",
+        );
+        return;
+    };
+    let source_name = match store.load(id) {
+        Ok(world) => world.metadata.name,
+        Err(error) => {
+            app.logger
+                .event("ERROR", "world_copy_failed", error.to_string());
+            return;
+        }
+    };
+    let existing_names = match store.list() {
+        Ok(worlds) => worlds
+            .into_iter()
+            .filter_map(|world| world.name)
+            .collect::<std::collections::BTreeSet<_>>(),
+        Err(error) => {
+            app.logger
+                .event("ERROR", "world_copy_failed", error.to_string());
+            return;
+        }
+    };
+    let base_name = format!("Copy of {source_name}");
+    let mut name = base_name.clone();
+    let mut suffix = 2;
+    while existing_names.contains(&name) {
+        name = format!("{base_name} ({suffix})");
+        suffix += 1;
+    }
+    match store.copy(id, &name) {
+        Ok(copied) => {
+            app.logger.event(
+                "INFO",
+                "world_copied",
+                format!("source={id} copy={}", copied.metadata.id),
+            );
+            install_main_menu(window, app);
+        }
+        Err(error) => app
+            .logger
+            .event("ERROR", "world_copy_failed", error.to_string()),
+    }
+}
+
+#[allow(static_mut_refs)]
+unsafe fn delete_world_from_menu(window: Hwnd, id: &str) {
+    let Some((store, name, active_id)) = APP.as_ref().and_then(|app| {
+        let store = app.world_store.clone()?;
+        let name = store
+            .load(id)
+            .map(|world| world.metadata.name)
+            .unwrap_or_else(|_| id.to_owned());
+        let active_id = app
+            .world_metadata
+            .as_ref()
+            .map(|metadata| metadata.id.clone());
+        Some((store, name, active_id))
+    }) else {
+        return;
+    };
+    if active_id.as_deref() == Some(id) {
+        if let Some(app) = APP.as_ref() {
+            app.logger.event(
+                "WARN",
+                "world_delete_rejected",
+                "cannot delete the active world",
+            );
+        }
+        return;
+    }
+    let prompt = wide(&format!(
+        "Permanently delete '{name}' and its backups? This cannot be undone."
+    ));
+    let caption = wide("Delete World");
+    if MessageBoxW(
+        window,
+        prompt.as_ptr(),
+        caption.as_ptr(),
+        MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2,
+    ) != IDYES
+    {
+        return;
+    }
+    match store.delete(id) {
+        Ok(()) => {
+            if let Some(app) = APP.as_mut() {
+                app.logger
+                    .event("INFO", "world_deleted", format!("id={id} name={name}"));
+                install_main_menu(window, app);
+            }
+        }
+        Err(error) => {
+            if let Some(app) = APP.as_ref() {
+                app.logger
+                    .event("ERROR", "world_delete_failed", error.to_string());
+            }
+        }
     }
 }
 
