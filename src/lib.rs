@@ -6,6 +6,7 @@ pub mod entity;
 pub mod gpu;
 pub mod grid;
 pub mod interaction;
+pub mod inventory;
 pub mod logger;
 pub mod movement;
 pub mod networking;

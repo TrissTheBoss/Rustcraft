@@ -46,6 +46,10 @@ The Windows prototype exposes save, create, edit options, copy, delete, open-rea
 
 Adventure remains a distinct stored/player mode when a world is reopened. The current player controller applies ordinary ground movement and disallows Creative flight; block edits are rejected until the engine has item permissions and block tags. This conservative behavior prevents the prototype from silently treating Adventure as Survival or granting unsupported edits; it is explicitly incomplete relative to the pinned game's Adventure rules.
 
+## 2026-11-07 â€” Centralize inventory mutations as transactions
+
+The inventory domain owns stack limits, item identity, player slots, equipment compatibility, cursor clicks, transfers, swaps, insertion, and consumption. UI code must call these operations rather than mutating slots directly. Exact transfers and swaps validate before changing either side; insertion may return an explicit remainder, and an inventory menu cannot discard an unreturned cursor stack. This first model is a foundation only: item components, full reference slot semantics, player-save integration, world drops, crafting, and the in-game screen remain to be implemented and verified.
+
 ## 2026-11-07 — Keep world management in the storage boundary
 
 World rename, copy, and delete operations belong to `WorldStore`, so UI actions share the same validation and save semantics. Rename preserves a prior snapshot, copies receive a new world ID while retaining source seed/mode/player/world data, and deletion validates the world directory before removing it. The prototype menu confirms deletion and disallows deleting the active world. Save and directory symlinks are rejected to prevent world operations from following paths outside the store.
