@@ -56,7 +56,11 @@ Player saves now encode 36 main slots, four armor slots, one offhand slot, item 
 
 ## 2026-11-07 â€” Model block loot and dropped-item pickup independently
 
-The first drop subsystem uses a data-driven block-to-item table, stable IDs, bounded entity count, fixed-tick gravity/settling, pickup delay, partial inventory insertion, and bounded expiry. Its starter loot and timing values are prototype-only and are not claims about any Java Edition baseline. It is not yet called by the Windows interaction loop or included in world saves/rendering; those integrations must preserve drops through switching, restart, and backup recovery before this can satisfy the PRD.
+The first drop subsystem uses a data-driven block-to-item table, stable IDs, bounded entity count, fixed-tick gravity/settling, pickup delay, partial inventory insertion, and bounded expiry. Its starter loot and timing values are prototype-only and are not claims about any Java Edition baseline. Save format v4 now persists dropped-item IDs, stacks, transforms, pickup delay, age, and next-ID state. The Windows interaction loop and renderer do not yet use the subsystem; integration must preserve drops through switching, restart, and backup recovery before this can satisfy the PRD.
+
+## 2026-11-07 â€” Persist dropped-item entities in save format v4
+
+Save v4 stores bounded dropped-item state alongside the player inventory, and decodes IDs, counts, positions, velocities, age, pickup delay, and allocator state with strict bounds. v1/v2 saves migrate with empty inventory and drops; v3 preserves inventory and adds an empty drop list. Player snapshots now carry drops so backup, copy, and restore paths use the same snapshot contract. Runtime creation, ticking, and rendering are still outstanding.
 
 ## 2026-11-07 — Keep world management in the storage boundary
 

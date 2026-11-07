@@ -81,6 +81,7 @@ pub struct DropTickResult {
 pub enum DropError {
     InvalidPosition,
     InvalidStack,
+    InvalidSavedState,
     DuplicateLoot,
     Capacity,
     IdExhausted,
@@ -98,6 +99,7 @@ impl std::fmt::Display for DropError {
         match self {
             Self::InvalidPosition => f.write_str("dropped-item position is invalid"),
             Self::InvalidStack => f.write_str("dropped-item stack is invalid"),
+            Self::InvalidSavedState => f.write_str("saved dropped-item state is invalid"),
             Self::DuplicateLoot => f.write_str("block already has a loot entry"),
             Self::Capacity => f.write_str("dropped-item entity capacity is full"),
             Self::IdExhausted => f.write_str("dropped-item ID space is exhausted"),
@@ -119,6 +121,39 @@ impl ItemDrops {
 
     pub fn iter(&self) -> impl Iterator<Item = &DroppedItem> {
         self.items.values()
+    }
+
+    pub(crate) fn save_parts(&self) -> (u64, Vec<DroppedItem>) {
+        (self.next_id, self.items.values().copied().collect())
+    }
+
+    pub(crate) fn from_save_parts(
+        next_id: u64,
+        items: Vec<DroppedItem>,
+    ) -> Result<Self, DropError> {
+        if items.len() > MAX_DROPPED_ITEMS {
+            return Err(DropError::Capacity);
+        }
+        let mut stored = BTreeMap::new();
+        for item in items {
+            if item.id.0 >= next_id
+                || item.stack.count == 0
+                || item.stack.count > crate::inventory::MAX_CATALOG_STACK_SIZE
+                || !valid_position(item.position)
+                || !item
+                    .velocity
+                    .iter()
+                    .all(|value| value.is_finite() && value.abs() <= 1_000_000.0)
+                || item.age_ticks >= ITEM_DESPAWN_TICKS
+                || stored.insert(item.id, item).is_some()
+            {
+                return Err(DropError::InvalidSavedState);
+            }
+        }
+        Ok(Self {
+            items: stored,
+            next_id,
+        })
     }
 
     pub fn spawn(

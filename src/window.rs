@@ -9,6 +9,7 @@ use std::time::Instant;
 
 use crate::blocks::Aabb;
 use crate::blocks::BlockRegistry;
+use crate::drops::ItemDrops;
 #[cfg(windows)]
 use crate::gpu::GpuRenderer;
 use crate::grid::PLAYER_EYE_OFFSET;
@@ -271,6 +272,7 @@ struct AppState {
     last_physics: Instant,
     selected_block: crate::world::BlockId,
     inventory: Inventory,
+    drops: ItemDrops,
     last_jump_press: Option<Instant>,
     jump_was_pressed: bool,
     toggle_flight_pending: bool,
@@ -1334,7 +1336,7 @@ mod world_creation_tests {
 
     #[test]
     fn adventure_mode_survives_player_controller_round_trip() {
-        let player = player_controller(PlayerSnapshot::default(), StoredGameMode::Adventure);
+        let player = player_controller(&PlayerSnapshot::default(), StoredGameMode::Adventure);
         assert_eq!(player.mode, GameMode::Adventure);
         assert_eq!(stored_game_mode(player.mode), StoredGameMode::Adventure);
     }
@@ -1759,9 +1761,10 @@ unsafe fn open_world_from_menu(window: Hwnd, app: &mut AppState, id: &str) {
 }
 
 unsafe fn activate_world(window: Hwnd, app: &mut AppState, saved: crate::world_store::StoredWorld) {
-    app.player = player_controller(saved.player, saved.metadata.game_mode);
+    app.player = player_controller(&saved.player, saved.metadata.game_mode);
     app.selected_block = saved.player.selected_block;
     app.inventory = saved.player.inventory;
+    app.drops = saved.player.drops.clone();
     app.yaw = saved.player.yaw;
     app.pitch = saved.player.pitch;
     app.world_metadata = Some(saved.metadata);
@@ -1824,7 +1827,7 @@ pub fn run(logger: Option<Logger>) {
         .as_ref()
         .map(|metadata| metadata.game_mode)
         .unwrap_or(StoredGameMode::Creative);
-    let player = player_controller(initial_player, mode);
+    let player = player_controller(&initial_player, mode);
     let scene = build_scene(world);
     let width = unsafe { GetSystemMetrics(SM_CXSCREEN) };
     let height = unsafe { GetSystemMetrics(SM_CYSCREEN) };
@@ -1844,6 +1847,7 @@ pub fn run(logger: Option<Logger>) {
             gpu: None,
             selected_block: initial_player.selected_block,
             inventory: initial_player.inventory,
+            drops: initial_player.drops.clone(),
             last_jump_press: None,
             jump_was_pressed: false,
             toggle_flight_pending: false,
@@ -2170,7 +2174,7 @@ fn handle_block_action(app: &mut AppState, scene: &mut Scene, breaking: bool) {
     );
 }
 
-fn player_controller(snapshot: PlayerSnapshot, mode: StoredGameMode) -> PlayerController {
+fn player_controller(snapshot: &PlayerSnapshot, mode: StoredGameMode) -> PlayerController {
     let mut player = PlayerController::new(crate::entity::Transform {
         x: snapshot.position[0],
         y: snapshot.position[1],
@@ -2212,6 +2216,7 @@ fn current_player_snapshot(app: &AppState) -> PlayerSnapshot {
         grounded: app.player.grounded,
         selected_block: app.selected_block,
         inventory: app.inventory,
+        drops: app.drops.clone(),
     }
 }
 
