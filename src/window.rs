@@ -63,6 +63,11 @@ const WS_OVERLAPPEDWINDOW: u32 = 0x00CF0000;
 const SW_SHOW: i32 = 5;
 const DIB_RGB_COLORS: u32 = 0;
 const SRCCOPY: u32 = 0x00CC0020;
+const TRANSPARENT: i32 = 1;
+const DT_LEFT: u32 = 0x0000;
+const DT_CENTER: u32 = 0x0001;
+const DT_VCENTER: u32 = 0x0004;
+const DT_SINGLELINE: u32 = 0x0020;
 const TIMER_ID: usize = 1;
 const RENDER_TIMER_ID: usize = 2;
 const DEATH_RESPAWN_ID: usize = 9001;
@@ -158,6 +163,7 @@ struct Point {
     y: i32,
 }
 #[repr(C)]
+#[derive(Clone, Copy)]
 struct Rect {
     left: i32,
     top: i32,
@@ -258,6 +264,7 @@ extern "system" {
     fn ShowCursor(show: i32) -> i32;
     fn GetWindowRect(window: Hwnd, rect: *mut Rect) -> i32;
     fn GetClientRect(window: Hwnd, rect: *mut Rect) -> i32;
+    fn DrawTextW(hdc: Hdc, text: *const u16, count: i32, rect: *mut Rect, format: u32) -> i32;
     fn ClientToScreen(window: Hwnd, point: *mut Point) -> i32;
     fn SetCursorPos(x: i32, y: i32) -> i32;
     fn GetSystemMetrics(index: i32) -> i32;
@@ -288,6 +295,11 @@ extern "system" {
         usage: u32,
         rop: u32,
     ) -> i32;
+    fn SetBkMode(hdc: Hdc, mode: i32) -> i32;
+    fn SetTextColor(hdc: Hdc, color: u32) -> u32;
+    fn CreateSolidBrush(color: u32) -> *mut c_void;
+    fn FillRect(hdc: Hdc, rect: *const Rect, brush: *mut c_void) -> i32;
+    fn DeleteObject(object: *mut c_void) -> i32;
 }
 #[repr(C)]
 struct Message {
@@ -595,29 +607,43 @@ unsafe extern "system" fn window_proc(
                 reserved: [0; 32],
             };
             let hdc = BeginPaint(window, &mut paint);
-            if let Some((pixels, info)) = FRAME.as_ref() {
-                let mut client = Rect {
-                    left: 0,
-                    top: 0,
-                    right: info.header.width,
-                    bottom: info.header.height.abs(),
-                };
-                GetClientRect(window, &mut client);
-                StretchDIBits(
-                    hdc,
-                    0,
-                    0,
-                    client.right,
-                    client.bottom,
-                    0,
-                    0,
-                    info.header.width,
-                    info.header.height.abs(),
-                    pixels.as_ptr() as *const c_void,
-                    info,
-                    DIB_RGB_COLORS,
-                    SRCCOPY,
-                );
+            if !APP.as_ref().is_some_and(|app| app.gpu.is_some()) {
+                if let Some((pixels, info)) = FRAME.as_ref() {
+                    let mut client = Rect {
+                        left: 0,
+                        top: 0,
+                        right: info.header.width,
+                        bottom: info.header.height.abs(),
+                    };
+                    GetClientRect(window, &mut client);
+                    StretchDIBits(
+                        hdc,
+                        0,
+                        0,
+                        client.right,
+                        client.bottom,
+                        0,
+                        0,
+                        info.header.width,
+                        info.header.height.abs(),
+                        pixels.as_ptr() as *const c_void,
+                        info,
+                        DIB_RGB_COLORS,
+                        SRCCOPY,
+                    );
+                }
+            }
+            if let (Some(app), Some(scene)) = (APP.as_ref(), SCENE.as_ref()) {
+                if !app.dialog_open {
+                    let mut client = Rect {
+                        left: 0,
+                        top: 0,
+                        right: 0,
+                        bottom: 0,
+                    };
+                    GetClientRect(window, &mut client);
+                    paint_hud(hdc, client, app, scene);
+                }
             }
             EndPaint(window, &paint);
             0
@@ -3574,9 +3600,9 @@ fn optional_seed(text: &str) -> Result<u64, ()> {
 #[cfg(test)]
 mod world_creation_tests {
     use super::{
-        build_scene, hotbar_slot_after_scroll, inventory_slot, is_initial_keydown, key_for,
-        matching_creative_blocks, optional_seed, player_controller, prototype_block_for_item,
-        stored_game_mode, GameMode, InventorySlot, StoredGameMode,
+        build_scene, health_pips, hotbar_slot_after_scroll, inventory_slot, is_initial_keydown,
+        key_for, matching_creative_blocks, optional_seed, player_controller,
+        prototype_block_for_item, stored_game_mode, GameMode, InventorySlot, StoredGameMode,
     };
     use crate::inventory::{ItemId, ItemKey};
     use crate::render::InputKey;
@@ -3672,6 +3698,14 @@ mod world_creation_tests {
     fn pause_escape_ignores_repeated_keydown_messages() {
         assert!(is_initial_keydown(0));
         assert!(!is_initial_keydown(0x4000_0000));
+    }
+
+    #[test]
+    fn health_hud_pips_show_full_half_and_empty_hearts() {
+        assert_eq!(health_pips(20), [2; 10]);
+        assert_eq!(health_pips(7), [2, 2, 2, 1, 0, 0, 0, 0, 0, 0]);
+        assert_eq!(health_pips(0), [0; 10]);
+        assert_eq!(health_pips(255), [2; 10]);
     }
 
     #[test]
@@ -5131,4 +5165,233 @@ fn build_frame(camera: Camera, width: u32, height: u32, scene: &Scene) -> (Vec<u
         colors: [[0; 4]; 1],
     };
     (pixels, info)
+}
+
+#[allow(static_mut_refs)]
+unsafe fn paint_hud(hdc: Hdc, client: Rect, app: &AppState, scene: &Scene) {
+    if client.right <= client.left || client.bottom <= client.top {
+        return;
+    }
+    SetBkMode(hdc, TRANSPARENT);
+    SetTextColor(hdc, rgb(245, 245, 245));
+
+    let center_x = (client.left + client.right) / 2;
+    let center_y = (client.top + client.bottom) / 2;
+    fill_hud_rect(
+        hdc,
+        Rect {
+            left: center_x - 1,
+            top: center_y - 7,
+            right: center_x + 2,
+            bottom: center_y + 8,
+        },
+        rgb(20, 20, 20),
+    );
+    fill_hud_rect(
+        hdc,
+        Rect {
+            left: center_x - 6,
+            top: center_y - 1,
+            right: center_x + 7,
+            bottom: center_y + 2,
+        },
+        rgb(20, 20, 20),
+    );
+    fill_hud_rect(
+        hdc,
+        Rect {
+            left: center_x,
+            top: center_y - 6,
+            right: center_x + 1,
+            bottom: center_y + 7,
+        },
+        rgb(245, 245, 245),
+    );
+    fill_hud_rect(
+        hdc,
+        Rect {
+            left: center_x - 5,
+            top: center_y,
+            right: center_x + 6,
+            bottom: center_y + 1,
+        },
+        rgb(245, 245, 245),
+    );
+
+    let available = (client.right - client.left - 32).max(9 * 28);
+    let slot_size = (available / 9).clamp(28, 48);
+    let strip_width = slot_size * 9;
+    let strip_left = (client.left + client.right - strip_width) / 2;
+    let strip_top = client.bottom - slot_size - 18;
+
+    let mode_has_health = matches!(app.player.mode, GameMode::Survival | GameMode::Adventure);
+    if mode_has_health {
+        let label = wide(&format!(
+            "Health: {}/{}",
+            app.vitals.health(),
+            crate::survival::MAX_HEALTH
+        ));
+        let mut rect = Rect {
+            left: 18,
+            top: strip_top - 45,
+            right: 180,
+            bottom: strip_top - 24,
+        };
+        DrawTextW(
+            hdc,
+            label.as_ptr(),
+            -1,
+            &mut rect,
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+        );
+        let start_x = 20;
+        let top = strip_top - 19;
+        for (heart, value) in health_pips(app.vitals.health()).into_iter().enumerate() {
+            let left = start_x + heart as i32 * 19;
+            let rect = Rect {
+                left,
+                top,
+                right: left + 16,
+                bottom: top + 12,
+            };
+            fill_hud_rect(hdc, rect, rgb(45, 28, 32));
+            if value >= 2 {
+                fill_hud_rect(
+                    hdc,
+                    Rect {
+                        left: left + 2,
+                        top: top + 2,
+                        right: left + 14,
+                        bottom: top + 10,
+                    },
+                    rgb(210, 42, 52),
+                );
+            } else if value == 1 {
+                fill_hud_rect(
+                    hdc,
+                    Rect {
+                        left: left + 2,
+                        top: top + 2,
+                        right: left + 8,
+                        bottom: top + 10,
+                    },
+                    rgb(210, 42, 52),
+                );
+            }
+        }
+    }
+
+    let selected = usize::from(app.inventory.selected_hotbar());
+    for index in 0..9 {
+        let left = strip_left + index as i32 * slot_size;
+        let outer = Rect {
+            left,
+            top: strip_top,
+            right: left + slot_size - 2,
+            bottom: strip_top + slot_size - 2,
+        };
+        fill_hud_rect(
+            hdc,
+            outer,
+            if index == selected {
+                rgb(235, 205, 105)
+            } else {
+                rgb(12, 12, 12)
+            },
+        );
+        fill_hud_rect(
+            hdc,
+            Rect {
+                left: left + 2,
+                top: strip_top + 2,
+                right: outer.right - 2,
+                bottom: outer.bottom - 2,
+            },
+            rgb(80, 80, 80),
+        );
+        if let Ok(Some(stack)) = app.inventory.stack(InventorySlot::Main(index)) {
+            let block = crate::world::BlockId(stack.key.id.0);
+            let color = scene.materials.get(block).color;
+            let icon_left = left + 7;
+            let icon_top = strip_top + 7;
+            fill_hud_rect(
+                hdc,
+                Rect {
+                    left: icon_left,
+                    top: icon_top,
+                    right: icon_left + slot_size - 18,
+                    bottom: icon_top + slot_size - 24,
+                },
+                rgb(color[0], color[1], color[2]),
+            );
+            let count = wide(&stack.count.to_string());
+            let mut count_rect = Rect {
+                left: left + 2,
+                top: outer.bottom - 18,
+                right: outer.right - 3,
+                bottom: outer.bottom - 2,
+            };
+            DrawTextW(
+                hdc,
+                count.as_ptr(),
+                -1,
+                &mut count_rect,
+                DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+            );
+        }
+        let number = wide(&(index + 1).to_string());
+        let mut number_rect = Rect {
+            left: left + 2,
+            top: strip_top + 2,
+            right: left + 13,
+            bottom: strip_top + 16,
+        };
+        DrawTextW(
+            hdc,
+            number.as_ptr(),
+            -1,
+            &mut number_rect,
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+        );
+    }
+
+    if let Some(stack) = app.inventory.selected_stack() {
+        let block = crate::world::BlockId(stack.key.id.0);
+        let name = BlockRegistry::new().definition(block).name;
+        let label = wide(&format!("{}  ×{}", name, stack.count));
+        let mut rect = Rect {
+            left: strip_left,
+            top: strip_top - 24,
+            right: strip_left + strip_width,
+            bottom: strip_top - 4,
+        };
+        DrawTextW(
+            hdc,
+            label.as_ptr(),
+            -1,
+            &mut rect,
+            DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+        );
+    }
+}
+
+unsafe fn fill_hud_rect(hdc: Hdc, rect: Rect, color: u32) {
+    let brush = CreateSolidBrush(color);
+    if !brush.is_null() {
+        FillRect(hdc, &rect, brush);
+        DeleteObject(brush);
+    }
+}
+
+const fn rgb(red: u8, green: u8, blue: u8) -> u32 {
+    red as u32 | ((green as u32) << 8) | ((blue as u32) << 16)
+}
+
+fn health_pips(health: u8) -> [u8; 10] {
+    std::array::from_fn(|index| {
+        health
+            .min(crate::survival::MAX_HEALTH)
+            .saturating_sub((index * 2) as u8)
+            .min(2)
+    })
 }

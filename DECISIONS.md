@@ -62,6 +62,10 @@ Chunk persistence reads and writes the existing contiguous block array directly,
 
 Save format v7 adds bounded player health and fall-distance/arming state so the current Survival prototype can resume across save/load. Versions 1-6 remain readable and default to full health with no pending fall. The current 20-point health scale, 3-block safe distance, integer damage calculation, spawn choice, death inventory retention, and respawn behavior are prototype decisions only. They require observable fixtures against the pinned Java Edition build before any conformance claim. Death is persisted through health zero; respawn is saved before leaving the death screen so a save failure cannot silently discard the dead state.
 
+## 2026-11-07 — Draw an original native overlay for core player status
+
+The Windows presentation path draws a minimal crosshair, hotbar, prototype item swatches/counts, and Survival/Adventure health pips after the scene frame. It uses the window's GDI paint pass so it can sit above either the CPU renderer or the GPU surface; when the GPU path is active, stale CPU-frame blits are skipped. This overlay establishes readable gameplay feedback, not reference styling or parity. Runtime presentation across GPU drivers, window sizes, modes, and accessibility settings still needs verification; hunger, armor, air, effects, and messages remain future HUD components.
+
 ## 2026-11-06 — Fixed-step deterministic simulation
 
 Simulation advances through an explicit fixed-step accumulator and stores bodies in a `BTreeMap` so tick order is stable by entity ID. The first collision boundary is an original ground plane at y=0; richer voxel collision remains a later increment.
