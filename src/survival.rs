@@ -10,6 +10,92 @@ pub const MAX_FOOD_LEVEL: u8 = 20;
 pub const MAX_FOOD_SATURATION_MILLI: u16 = 20_000;
 pub const EXHAUSTION_PER_FOOD_POINT_MILLI: u16 = 4_000;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum HungerDifficulty {
+    Peaceful,
+    Easy,
+    Normal,
+    Hard,
+}
+
+/// Provisional slow regeneration/starvation clock. Fast saturation-driven
+/// fractional healing remains a separate conformance requirement.
+#[derive(Default)]
+pub struct HungerClock {
+    phase: u8,
+    ticks: u16,
+}
+
+impl HungerClock {
+    pub fn tick(
+        &mut self,
+        food: &mut FoodState,
+        vitals: &mut PlayerVitals,
+        difficulty: HungerDifficulty,
+    ) -> DamageOutcome {
+        let phase = if vitals.is_dead() {
+            0
+        } else if difficulty == HungerDifficulty::Peaceful {
+            1
+        } else if food.food_level() >= 18 && vitals.health() < MAX_HEALTH {
+            2
+        } else if food.food_level() == 0 {
+            match difficulty {
+                HungerDifficulty::Easy => 3,
+                HungerDifficulty::Normal => 4,
+                _ => 5,
+            }
+        } else {
+            0
+        };
+        if phase != self.phase {
+            self.ticks = 0;
+            self.phase = phase;
+        }
+        let no_damage = DamageOutcome {
+            applied: 0,
+            became_dead: false,
+        };
+        if phase == 0 {
+            self.ticks = 0;
+            return no_damage;
+        }
+        self.ticks += 1;
+        if phase == 1 {
+            if self.ticks % 10 == 0 {
+                food.eat(1, 0);
+            }
+            if self.ticks == 20 {
+                vitals.heal(1);
+                self.ticks = 0;
+            }
+            return no_damage;
+        }
+        if self.ticks < 80 {
+            return no_damage;
+        }
+        self.ticks = 0;
+        if phase == 2 {
+            if vitals.heal(1) > 0 {
+                food.apply_exhaustion(6_000);
+            }
+            return no_damage;
+        }
+        let floor = if phase == 3 {
+            10
+        } else if phase == 4 {
+            1
+        } else {
+            0
+        };
+        if vitals.health() > floor {
+            vitals.damage(1)
+        } else {
+            no_damage
+        }
+    }
+}
+
 /// Provisional activity rates. Fractional milli-exhaustion is kept between
 /// ticks so a slow rendering cadence cannot change distance-based costs.
 #[derive(Default)]
@@ -203,6 +289,100 @@ impl PlayerVitals {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn regeneration_waits_for_interval_and_charges_food_once() {
+        use super::*;
+        let mut clock = HungerClock::default();
+        let mut food = FoodState::from_saved(18, 0, 0).unwrap();
+        let mut vitals = PlayerVitals::from_saved_health(15).unwrap();
+        for _ in 0..79 {
+            clock.tick(&mut food, &mut vitals, HungerDifficulty::Normal);
+        }
+        assert_eq!(vitals.health(), 15);
+        clock.tick(&mut food, &mut vitals, HungerDifficulty::Normal);
+        assert_eq!(vitals.health(), 16);
+        assert_eq!(food.food_level(), 17);
+        assert_eq!(food.exhaustion_milli(), 2_000);
+        for _ in 0..160 {
+            clock.tick(&mut food, &mut vitals, HungerDifficulty::Normal);
+        }
+        assert_eq!(vitals.health(), 16);
+    }
+
+    #[test]
+    fn starvation_obeys_difficulty_floor_and_reports_one_death() {
+        use super::*;
+        for (difficulty, floor) in [
+            (HungerDifficulty::Easy, 10),
+            (HungerDifficulty::Normal, 1),
+            (HungerDifficulty::Hard, 0),
+        ] {
+            let mut clock = HungerClock::default();
+            let mut food = FoodState::from_saved(0, 0, 0).unwrap();
+            let mut vitals = PlayerVitals::from_saved_health(floor + 1).unwrap();
+            let mut deaths = 0;
+            for tick in 0..240 {
+                let outcome = clock.tick(&mut food, &mut vitals, difficulty);
+                deaths += u32::from(outcome.became_dead);
+                if tick < 79 {
+                    assert_eq!(vitals.health(), floor + 1);
+                }
+            }
+            assert_eq!(vitals.health(), floor);
+            assert_eq!(deaths, u32::from(floor == 0));
+        }
+    }
+
+    #[test]
+    fn eating_and_difficulty_change_cancel_pending_starvation() {
+        use super::*;
+        let mut clock = HungerClock::default();
+        let mut food = FoodState::from_saved(0, 0, 0).unwrap();
+        let mut vitals = PlayerVitals::from_saved_health(10).unwrap();
+        for _ in 0..79 {
+            clock.tick(&mut food, &mut vitals, HungerDifficulty::Hard);
+        }
+        food.eat(4, 0);
+        assert_eq!(
+            clock
+                .tick(&mut food, &mut vitals, HungerDifficulty::Hard)
+                .applied,
+            0
+        );
+        food = FoodState::from_saved(0, 0, 0).unwrap();
+        for _ in 0..79 {
+            clock.tick(&mut food, &mut vitals, HungerDifficulty::Hard);
+        }
+        assert_eq!(
+            clock
+                .tick(&mut food, &mut vitals, HungerDifficulty::Normal)
+                .applied,
+            0
+        );
+        assert_eq!(vitals.health(), 10);
+    }
+
+    #[test]
+    fn peaceful_recovers_food_and_health_but_never_revives_dead_player() {
+        use super::*;
+        let mut clock = HungerClock::default();
+        let mut food = FoodState::from_saved(0, 0, 0).unwrap();
+        let mut vitals = PlayerVitals::from_saved_health(19).unwrap();
+        for _ in 0..20 {
+            clock.tick(&mut food, &mut vitals, HungerDifficulty::Peaceful);
+        }
+        assert_eq!(food.food_level(), 2);
+        assert_eq!(vitals.health(), 20);
+        vitals.damage(20);
+        for _ in 0..80 {
+            assert!(
+                !clock
+                    .tick(&mut food, &mut vitals, HungerDifficulty::Peaceful)
+                    .became_dead
+            );
+        }
+        assert!(vitals.is_dead());
+    }
     #[test]
     fn activity_cost_preserves_fractional_distance_and_jump_events() {
         let mut costs = super::ActivityExhaustion::default();

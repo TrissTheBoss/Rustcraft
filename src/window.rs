@@ -390,6 +390,7 @@ struct AppState {
     vitals: PlayerVitals,
     food: crate::survival::FoodState,
     activity_exhaustion: crate::survival::ActivityExhaustion,
+    hunger_clock: crate::survival::HungerClock,
     gpu: Option<GpuRenderer>,
     viewport: Hwnd,
     presenting_dialog: bool,
@@ -830,7 +831,12 @@ unsafe extern "system" fn window_proc(
                                     }
                                 },
                             );
-                            if uses_hunger && !previous_flying && !app.player.flying {
+                            let difficulty = hunger_difficulty(app);
+                            if uses_hunger
+                                && difficulty != crate::survival::HungerDifficulty::Peaceful
+                                && !previous_flying
+                                && !app.player.flying
+                            {
                                 let dx = app.player.transform.x - previous_transform.x;
                                 let dz = app.player.transform.z - previous_transform.z;
                                 let sprint_distance = if input.sprint && previous_grounded {
@@ -850,7 +856,22 @@ unsafe extern "system" fn window_proc(
                                     }
                                 }
                             }
-                            if let Some(distance) = fall_distance {
+                            let before_hunger = (app.food, app.vitals);
+                            let hunger_death = if uses_hunger {
+                                app.hunger_clock
+                                    .tick(&mut app.food, &mut app.vitals, difficulty)
+                                    .became_dead
+                            } else {
+                                app.hunger_clock = crate::survival::HungerClock::default();
+                                false
+                            };
+                            if before_hunger != (app.food, app.vitals) {
+                                if let Some(scene) = SCENE.as_mut() {
+                                    scene.dirty = true;
+                                }
+                            }
+                            if fall_distance.is_some() || hunger_death {
+                                let distance = fall_distance.unwrap_or(0.0);
                                 if matches!(
                                     app.player.mode,
                                     GameMode::Survival | GameMode::Adventure
@@ -870,7 +891,7 @@ unsafe extern "system" fn window_proc(
                                             scene.dirty = true;
                                         }
                                     }
-                                    if outcome.became_dead {
+                                    if outcome.became_dead || hunger_death {
                                         app.death_items_retained = false;
                                         let keep_inventory = app
                                             .world_metadata
@@ -2785,6 +2806,7 @@ unsafe fn respawn_player(window: Hwnd) {
         app.player.fall_damage_armed = false;
         app.player.flying = false;
         app.vitals.respawn();
+        app.hunger_clock = crate::survival::HungerClock::default();
         scene.dirty = true;
         persist_world(app, scene).map_err(|error| error.to_string())
     })();
@@ -4759,6 +4781,7 @@ unsafe fn activate_world(window: Hwnd, app: &mut AppState, saved: crate::world_s
     app.player = player_controller(&saved.player, saved.metadata.game_mode);
     app.vitals = PlayerVitals::from_saved_health(saved.player.health).unwrap_or_default();
     app.food = saved.player.food;
+    app.hunger_clock = crate::survival::HungerClock::default();
     app.activity_exhaustion = crate::survival::ActivityExhaustion::default();
     app.death_items_retained = false;
     app.selected_block = saved.player.selected_block;
@@ -5005,6 +5028,7 @@ pub fn run(logger: Option<Logger>) {
             vitals: PlayerVitals::from_saved_health(initial_player.health).unwrap_or_default(),
             food: initial_player.food,
             activity_exhaustion: crate::survival::ActivityExhaustion::default(),
+            hunger_clock: crate::survival::HungerClock::default(),
         });
         if let Some(app) = APP.as_ref() {
             app.logger.event(
@@ -5289,6 +5313,21 @@ fn prototype_item_catalog() -> ItemCatalog {
     catalog
 }
 
+fn hunger_difficulty(app: &AppState) -> crate::survival::HungerDifficulty {
+    use crate::survival::HungerDifficulty as H;
+    match app
+        .world_metadata
+        .as_ref()
+        .map(|world| world.difficulty)
+        .unwrap_or_default()
+    {
+        StoredDifficulty::Peaceful => H::Peaceful,
+        StoredDifficulty::Easy => H::Easy,
+        StoredDifficulty::Normal => H::Normal,
+        StoredDifficulty::Hard => H::Hard,
+    }
+}
+
 fn prototype_block_for_item(key: ItemKey) -> Option<crate::world::BlockId> {
     (key.variant == 0 && (1..=10).contains(&key.id.0)).then_some(crate::world::BlockId(key.id.0))
 }
@@ -5527,7 +5566,10 @@ fn handle_block_action(app: &mut AppState, scene: &mut Scene, breaking: bool) {
         }
     };
     if changed {
-        if breaking && app.player.mode == GameMode::Survival {
+        if breaking
+            && app.player.mode == GameMode::Survival
+            && hunger_difficulty(app) != crate::survival::HungerDifficulty::Peaceful
+        {
             app.food.apply_exhaustion(5);
         }
         scene.dirty = true;
