@@ -5,6 +5,7 @@ use std::collections::VecDeque;
 use std::ffi::c_void;
 use std::mem::size_of;
 use std::ptr::{null, null_mut};
+use std::sync::OnceLock;
 use std::time::Instant;
 
 use crate::blocks::Aabb;
@@ -23,7 +24,7 @@ use crate::inventory::{
 };
 use crate::logger::Logger;
 use crate::mining::{MiningCatalog, MiningEvent, MiningSession, MiningTool};
-use crate::movement::{GameMode, MovementInput, PlayerController};
+use crate::movement::{FixedStepClock, GameMode, MovementInput, PlayerController};
 use crate::render::{
     load_png, mesh_chunk_with_shapes, Camera, CpuRenderer, DirectionalLight, InputKey, InputState,
     Material, MaterialRegistry, Mesh, Renderer, Vec3,
@@ -50,6 +51,8 @@ const WM_COMMAND: u32 = 0x0111;
 const WM_CLOSE: u32 = 0x0010;
 const WM_PAINT: u32 = 0x000F;
 const WM_ERASEBKGND: u32 = 0x0014;
+const WM_DRAWITEM: u32 = 0x002B;
+const WM_CTLCOLORSTATIC: u32 = 0x0138;
 const WM_TIMER: u32 = 0x0113;
 const WM_APP_DEATH: u32 = 0x8001;
 const WM_KEYDOWN: u32 = 0x0100;
@@ -131,8 +134,16 @@ const WS_TABSTOP: u32 = 0x0001_0000;
 const ES_AUTOHSCROLL: u32 = 0x0080;
 const CBS_DROPDOWNLIST: u32 = 0x0003;
 const SS_WHITERECT: u32 = 0x0006;
+const SS_OWNERDRAW: u32 = 0x000D;
 const BS_DEFPUSHBUTTON: u32 = 0x0001;
 const BS_PUSHBUTTON: u32 = 0x0000;
+const BS_OWNERDRAW: u32 = 0x000B;
+const ODT_STATIC: u32 = 2;
+const ODT_BUTTON: u32 = 4;
+const ODS_SELECTED: u32 = 0x0001;
+const ODS_DISABLED: u32 = 0x0004;
+const ODS_FOCUS: u32 = 0x0010;
+const HOLLOW_BRUSH: i32 = 5;
 const IDYES: i32 = 6;
 const MB_YESNO: u32 = 0x0004;
 const MB_ICONWARNING: u32 = 0x0030;
@@ -179,6 +190,18 @@ struct PaintStruct {
     restore: i32,
     inc_update: i32,
     reserved: [u8; 32],
+}
+#[repr(C)]
+struct DrawItemStruct {
+    control_type: u32,
+    control_id: u32,
+    item_id: u32,
+    item_action: u32,
+    item_state: u32,
+    item_window: Hwnd,
+    hdc: Hdc,
+    item_rect: Rect,
+    item_data: usize,
 }
 #[repr(C)]
 struct WndClassW {
@@ -298,9 +321,18 @@ extern "system" {
     ) -> i32;
     fn SetBkMode(hdc: Hdc, mode: i32) -> i32;
     fn SetTextColor(hdc: Hdc, color: u32) -> u32;
+    fn GetStockObject(object: i32) -> *mut c_void;
     fn CreateSolidBrush(color: u32) -> *mut c_void;
     fn FillRect(hdc: Hdc, rect: *const Rect, brush: *mut c_void) -> i32;
     fn DeleteObject(object: *mut c_void) -> i32;
+    fn CreateBitmap(
+        width: i32,
+        height: i32,
+        planes: u32,
+        bits_per_pixel: u32,
+        bits: *const c_void,
+    ) -> *mut c_void;
+    fn CreatePatternBrush(bitmap: *mut c_void) -> *mut c_void;
 }
 #[repr(C)]
 struct Message {
@@ -322,6 +354,8 @@ static mut INVENTORY_FORM: Option<InventoryForm> = None;
 static mut PAUSE_FORM: Option<PauseForm> = None;
 static mut OPTIONS_FORM: Option<OptionsForm> = None;
 static mut DEATH_FORM: Option<DeathForm> = None;
+static PANEL_TEXTURE_BRUSH: OnceLock<usize> = OnceLock::new();
+static BUTTON_TEXTURE_BRUSH: OnceLock<usize> = OnceLock::new();
 
 struct Scene {
     world: crate::world::World,
@@ -355,6 +389,7 @@ struct AppState {
     food: crate::survival::FoodState,
     gpu: Option<GpuRenderer>,
     last_physics: Instant,
+    physics_clock: FixedStepClock,
     selected_block: crate::world::BlockId,
     hotbar_scroll_remainder: i32,
     inventory: Inventory,
@@ -596,6 +631,20 @@ unsafe extern "system" fn window_proc(
             }
             0
         }
+        WM_DRAWITEM if lparam != 0 => {
+            let item = &mut *(lparam as *mut DrawItemStruct);
+            match item.control_type {
+                ODT_STATIC => draw_menu_panel(item.hdc, item.item_rect),
+                ODT_BUTTON => draw_menu_button(item),
+                _ => return DefWindowProcW(window, message, wparam, lparam),
+            }
+            1
+        }
+        WM_CTLCOLORSTATIC => {
+            SetTextColor(wparam as Hdc, rgb(230, 236, 238));
+            SetBkMode(wparam as Hdc, TRANSPARENT);
+            GetStockObject(HOLLOW_BRUSH) as Lresult
+        }
         WM_PAINT => {
             let mut paint = PaintStruct {
                 hdc: null_mut(),
@@ -660,263 +709,259 @@ unsafe extern "system" fn window_proc(
         WM_TIMER => {
             if let Some(app) = APP.as_mut() {
                 if wparam == TIMER_ID && !app.dialog_open {
-                    app.logger.event("TRACE", "timer_tick", "interval_ms=50");
-                    if let Some(scene) = SCENE.as_ref() {
-                        let previous_transform = app.player.transform;
-                        let previous_velocity = app.player.velocity;
-                        let previous_flying = app.player.flying;
-                        let previous_grounded = app.player.grounded;
-                        let previous_mode = app.player.mode;
-                        let input = MovementInput {
-                            forward: app.input.is_pressed(InputKey::Forward) as i32 as f64
-                                - app.input.is_pressed(InputKey::Backward) as i32 as f64,
-                            strafe: app.input.is_pressed(InputKey::Right) as i32 as f64
-                                - app.input.is_pressed(InputKey::Left) as i32 as f64,
-                            jump: app.input.is_pressed(InputKey::Up),
-                            sneak: app
-                                .settings
-                                .sneak_behavior
-                                .active(app.input.is_pressed(InputKey::Down), app.sneak_toggled),
-                            sprint: app
-                                .settings
-                                .sprint_behavior
-                                .active(app.input.is_pressed(InputKey::Sprint), app.sprint_toggled),
-                            toggle_flight: app.toggle_flight_pending,
-                        };
-                        app.toggle_flight_pending = false;
-                        app.jump_was_pressed = app.input.is_pressed(InputKey::Up);
-                        let fall_distance = app.player.tick_with_collision_shapes(
-                            input,
-                            app.yaw as f64,
-                            |x, y, z| {
-                                let block_position = [x, y, z];
-                                match (
-                                    scene.world.block_at(block_position),
-                                    scene.world.block_state_at(block_position),
+                    let now = Instant::now();
+                    let physics_steps = app
+                        .physics_clock
+                        .advance(now.duration_since(app.last_physics));
+                    app.last_physics = now;
+                    for _ in 0..physics_steps {
+                        if let Some(scene) = SCENE.as_ref() {
+                            let previous_transform = app.player.transform;
+                            let previous_velocity = app.player.velocity;
+                            let previous_flying = app.player.flying;
+                            let previous_grounded = app.player.grounded;
+                            let previous_mode = app.player.mode;
+                            let input = MovementInput {
+                                forward: app.input.is_pressed(InputKey::Forward) as i32 as f64
+                                    - app.input.is_pressed(InputKey::Backward) as i32 as f64,
+                                strafe: app.input.is_pressed(InputKey::Right) as i32 as f64
+                                    - app.input.is_pressed(InputKey::Left) as i32 as f64,
+                                jump: app.input.is_pressed(InputKey::Up),
+                                sneak: app.settings.sneak_behavior.active(
+                                    app.input.is_pressed(InputKey::Down),
+                                    app.sneak_toggled,
+                                ),
+                                sprint: app.settings.sprint_behavior.active(
+                                    app.input.is_pressed(InputKey::Sprint),
+                                    app.sprint_toggled,
+                                ),
+                                toggle_flight: app.toggle_flight_pending,
+                            };
+                            app.toggle_flight_pending = false;
+                            app.jump_was_pressed = app.input.is_pressed(InputKey::Up);
+                            let fall_distance = app.player.tick_with_collision_shapes(
+                                input,
+                                app.yaw as f64,
+                                |x, y, z| {
+                                    let block_position = [x, y, z];
+                                    match (
+                                        scene.world.block_at(block_position),
+                                        scene.world.block_state_at(block_position),
+                                    ) {
+                                        (Some(block), Some(state)) => {
+                                            BlockRegistry::new().collision_shape(block, state)
+                                        }
+                                        _ => crate::blocks::CollisionShape::EMPTY,
+                                    }
+                                },
+                            );
+                            if let Some(distance) = fall_distance {
+                                if matches!(
+                                    app.player.mode,
+                                    GameMode::Survival | GameMode::Adventure
                                 ) {
-                                    (Some(block), Some(state)) => {
-                                        BlockRegistry::new().collision_shape(block, state)
-                                    }
-                                    _ => crate::blocks::CollisionShape::EMPTY,
-                                }
-                            },
-                        );
-                        if let Some(distance) = fall_distance {
-                            if matches!(app.player.mode, GameMode::Survival | GameMode::Adventure) {
-                                let outcome = app.vitals.apply_fall_damage(distance);
-                                if outcome.applied > 0 {
-                                    app.logger.event(
-                                        "INFO",
-                                        "fall_damage",
-                                        format!(
-                                            "distance={distance:.2} damage={} health={}",
-                                            outcome.applied,
-                                            app.vitals.health()
-                                        ),
-                                    );
-                                    if let Some(scene) = SCENE.as_mut() {
-                                        scene.dirty = true;
-                                    }
-                                }
-                                if outcome.became_dead {
-                                    app.death_items_retained = false;
-                                    let keep_inventory = app
-                                        .world_metadata
-                                        .as_ref()
-                                        .is_some_and(|metadata| metadata.keep_inventory);
-                                    if keep_inventory {
+                                    let outcome = app.vitals.apply_fall_damage(distance);
+                                    if outcome.applied > 0 {
                                         app.logger.event(
                                             "INFO",
-                                            "death_inventory_kept",
-                                            "keepInventory is enabled",
+                                            "fall_damage",
+                                            format!(
+                                                "distance={distance:.2} damage={} health={}",
+                                                outcome.applied,
+                                                app.vitals.health()
+                                            ),
                                         );
-                                    } else {
-                                        let position = [
-                                            app.player.transform.x,
-                                            app.player.transform.y,
-                                            app.player.transform.z,
-                                        ];
-                                        match app.inventory.drop_all(
-                                            &mut app.drops,
-                                            position,
-                                            ITEM_PICKUP_DELAY_TICKS,
-                                            &app.item_catalog,
-                                        ) {
-                                            Ok(stack_count) => {
-                                                if let Some(scene) = SCENE.as_mut() {
-                                                    scene.dirty = true;
-                                                    scene.drop_meshes =
-                                                        build_drop_meshes(&app.drops);
-                                                    if let Some(gpu) = app.gpu.as_mut() {
-                                                        upload_scene_meshes(gpu, scene);
-                                                    }
-                                                }
-                                                app.logger.event(
-                                                    "INFO",
-                                                    "death_inventory_dropped",
-                                                    format!("stacks={stack_count}"),
-                                                );
-                                            }
-                                            Err(error) => {
-                                                app.death_items_retained = true;
-                                                app.logger.event(
-                                                    "ERROR",
-                                                    "death_inventory_drop_failed",
-                                                    error.to_string(),
-                                                );
-                                            }
+                                        if let Some(scene) = SCENE.as_mut() {
+                                            scene.dirty = true;
                                         }
                                     }
-                                    PostMessageW(window, WM_APP_DEATH, 0, 0);
-                                }
-                            }
-                        }
-                        let center = (
-                            (app.player.transform.x / CHUNK_SIZE as f64).floor() as i32,
-                            (app.player.transform.z / CHUNK_SIZE as f64).floor() as i32,
-                        );
-                        if let Some(scene) = SCENE.as_mut() {
-                            match scene.stream_to(center) {
-                                Ok(true) => {
-                                    app.logger.event(
-                                        "INFO",
-                                        "terrain_region_loaded",
-                                        format!("center={},{}", center.0, center.1),
-                                    );
-                                    if let Some(gpu) = app.gpu.as_mut() {
-                                        upload_scene_meshes(gpu, scene);
-                                    }
-                                }
-                                Ok(false) => {}
-                                Err(error) => {
-                                    app.logger
-                                        .event("WARN", "terrain_region_load_failed", error)
-                                }
-                            }
-                        }
-                        if app.player.transform != previous_transform
-                            || app.player.velocity != previous_velocity
-                            || app.player.flying != previous_flying
-                            || app.player.grounded != previous_grounded
-                            || app.player.mode != previous_mode
-                        {
-                            if let Some(scene) = SCENE.as_mut() {
-                                scene.dirty = true;
-                            }
-                        }
-                        while let Some(breaking) = app.pending_block_actions.pop_front() {
-                            if let Some(scene) = SCENE.as_mut() {
-                                handle_block_action(app, scene, breaking);
-                            }
-                        }
-                        let mining_target =
-                            if app.player.mode == GameMode::Survival && app.breaking_held {
-                                SCENE
-                                    .as_ref()
-                                    .and_then(|scene| targeted_block_hit(app, &scene.world))
-                            } else {
-                                None
-                            };
-                        let required_ticks = mining_target
-                            .map(|hit| {
-                                app.mining_catalog
-                                    .ticks_to_break(hit.block, MiningTool::HAND)
-                                    .unwrap_or(u16::MAX)
-                            })
-                            .unwrap_or(0);
-                        let mining_event = app.mining_session.tick(
-                            app.player.mode == GameMode::Survival && app.breaking_held,
-                            mining_target,
-                            required_ticks,
-                        );
-                        if matches!(mining_event, MiningEvent::Completed(_)) {
-                            if let Some(scene) = SCENE.as_mut() {
-                                handle_block_action(app, scene, true);
-                            }
-                        }
-                        if !app.drops.is_empty() {
-                            if let Some(scene) = SCENE.as_mut() {
-                                let player_position = [
-                                    app.player.transform.x,
-                                    app.player.transform.y,
-                                    app.player.transform.z,
-                                ];
-                                match app.drops.tick(
-                                    &scene.world,
-                                    player_position,
-                                    &mut app.inventory,
-                                    &app.item_catalog,
-                                    &BlockRegistry::new(),
-                                ) {
-                                    Ok(result) => {
-                                        scene.dirty = true;
-                                        let drop_meshes = build_drop_meshes(&app.drops);
-                                        if drop_meshes != scene.drop_meshes {
-                                            scene.drop_meshes = drop_meshes;
-                                            if let Some(gpu) = app.gpu.as_mut() {
-                                                upload_scene_meshes(gpu, scene);
-                                            }
-                                        }
-                                        if result.picked_up_items > 0 || result.removed_entities > 0
-                                        {
+                                    if outcome.became_dead {
+                                        app.death_items_retained = false;
+                                        let keep_inventory = app
+                                            .world_metadata
+                                            .as_ref()
+                                            .is_some_and(|metadata| metadata.keep_inventory);
+                                        if keep_inventory {
                                             app.logger.event(
                                                 "INFO",
-                                                "dropped_item_lifecycle",
-                                                format!(
-                                                    "picked_up={} removed={} remaining={}",
-                                                    result.picked_up_items,
-                                                    result.removed_entities,
-                                                    app.drops.len()
-                                                ),
+                                                "death_inventory_kept",
+                                                "keepInventory is enabled",
                                             );
+                                        } else {
+                                            let position = [
+                                                app.player.transform.x,
+                                                app.player.transform.y,
+                                                app.player.transform.z,
+                                            ];
+                                            match app.inventory.drop_all(
+                                                &mut app.drops,
+                                                position,
+                                                ITEM_PICKUP_DELAY_TICKS,
+                                                &app.item_catalog,
+                                            ) {
+                                                Ok(stack_count) => {
+                                                    if let Some(scene) = SCENE.as_mut() {
+                                                        scene.dirty = true;
+                                                        scene.drop_meshes =
+                                                            build_drop_meshes(&app.drops);
+                                                        if let Some(gpu) = app.gpu.as_mut() {
+                                                            upload_scene_meshes(gpu, scene);
+                                                        }
+                                                    }
+                                                    app.logger.event(
+                                                        "INFO",
+                                                        "death_inventory_dropped",
+                                                        format!("stacks={stack_count}"),
+                                                    );
+                                                }
+                                                Err(error) => {
+                                                    app.death_items_retained = true;
+                                                    app.logger.event(
+                                                        "ERROR",
+                                                        "death_inventory_drop_failed",
+                                                        error.to_string(),
+                                                    );
+                                                }
+                                            }
+                                        }
+                                        PostMessageW(window, WM_APP_DEATH, 0, 0);
+                                    }
+                                }
+                            }
+                            let center = (
+                                (app.player.transform.x / CHUNK_SIZE as f64).floor() as i32,
+                                (app.player.transform.z / CHUNK_SIZE as f64).floor() as i32,
+                            );
+                            if let Some(scene) = SCENE.as_mut() {
+                                match scene.stream_to(center) {
+                                    Ok(true) => {
+                                        app.logger.event(
+                                            "INFO",
+                                            "terrain_region_loaded",
+                                            format!("center={},{}", center.0, center.1),
+                                        );
+                                        if let Some(gpu) = app.gpu.as_mut() {
+                                            upload_scene_meshes(gpu, scene);
                                         }
                                     }
+                                    Ok(false) => {}
                                     Err(error) => app.logger.event(
                                         "WARN",
-                                        "dropped_item_tick_failed",
-                                        error.to_string(),
+                                        "terrain_region_load_failed",
+                                        error,
                                     ),
                                 }
                             }
-                        }
-                        if app.last_save.elapsed().as_secs() >= 30 {
-                            if let Some(scene) = SCENE.as_mut() {
-                                if scene.dirty {
-                                    match persist_world(app, scene) {
-                                        Ok(()) => app.logger.event(
-                                            "INFO",
-                                            "world_autosaved",
-                                            "reason=dirty interval_seconds=30",
-                                        ),
+                            if app.player.transform != previous_transform
+                                || app.player.velocity != previous_velocity
+                                || app.player.flying != previous_flying
+                                || app.player.grounded != previous_grounded
+                                || app.player.mode != previous_mode
+                            {
+                                if let Some(scene) = SCENE.as_mut() {
+                                    scene.dirty = true;
+                                }
+                            }
+                            while let Some(breaking) = app.pending_block_actions.pop_front() {
+                                if let Some(scene) = SCENE.as_mut() {
+                                    handle_block_action(app, scene, breaking);
+                                }
+                            }
+                            let mining_target =
+                                if app.player.mode == GameMode::Survival && app.breaking_held {
+                                    SCENE
+                                        .as_ref()
+                                        .and_then(|scene| targeted_block_hit(app, &scene.world))
+                                } else {
+                                    None
+                                };
+                            let required_ticks = mining_target
+                                .map(|hit| {
+                                    app.mining_catalog
+                                        .ticks_to_break(hit.block, MiningTool::HAND)
+                                        .unwrap_or(u16::MAX)
+                                })
+                                .unwrap_or(0);
+                            let mining_event = app.mining_session.tick(
+                                app.player.mode == GameMode::Survival && app.breaking_held,
+                                mining_target,
+                                required_ticks,
+                            );
+                            if matches!(mining_event, MiningEvent::Completed(_)) {
+                                if let Some(scene) = SCENE.as_mut() {
+                                    handle_block_action(app, scene, true);
+                                }
+                            }
+                            if !app.drops.is_empty() {
+                                if let Some(scene) = SCENE.as_mut() {
+                                    let player_position = [
+                                        app.player.transform.x,
+                                        app.player.transform.y,
+                                        app.player.transform.z,
+                                    ];
+                                    match app.drops.tick(
+                                        &scene.world,
+                                        player_position,
+                                        &mut app.inventory,
+                                        &app.item_catalog,
+                                        &BlockRegistry::new(),
+                                    ) {
+                                        Ok(result) => {
+                                            scene.dirty = true;
+                                            let drop_meshes = build_drop_meshes(&app.drops);
+                                            if drop_meshes != scene.drop_meshes {
+                                                scene.drop_meshes = drop_meshes;
+                                                if let Some(gpu) = app.gpu.as_mut() {
+                                                    upload_scene_meshes(gpu, scene);
+                                                }
+                                            }
+                                            if result.picked_up_items > 0
+                                                || result.removed_entities > 0
+                                            {
+                                                app.logger.event(
+                                                    "INFO",
+                                                    "dropped_item_lifecycle",
+                                                    format!(
+                                                        "picked_up={} removed={} remaining={}",
+                                                        result.picked_up_items,
+                                                        result.removed_entities,
+                                                        app.drops.len()
+                                                    ),
+                                                );
+                                            }
+                                        }
                                         Err(error) => app.logger.event(
-                                            "ERROR",
-                                            "world_autosave_failed",
+                                            "WARN",
+                                            "dropped_item_tick_failed",
                                             error.to_string(),
                                         ),
                                     }
                                 }
                             }
-                        }
-                        app.logger.event(
-                            "TRACE",
-                            "player_tick",
-                            format!(
-                                "x={:.4} y={:.4} z={:.4} vx={:.4} vy={:.4} vz={:.4} grounded={}",
-                                app.player.transform.x,
-                                app.player.transform.y,
-                                app.player.transform.z,
-                                app.player.velocity[0],
-                                app.player.velocity[1],
-                                app.player.velocity[2],
-                                app.player.grounded
-                            ),
-                        );
-                        let world_name = app
-                            .world_metadata
-                            .as_ref()
-                            .map(|metadata| metadata.name.as_str())
-                            .unwrap_or("Unsaved Prototype");
-                        let title = wide(&format!(
+                            if app.last_save.elapsed().as_secs() >= 30 {
+                                if let Some(scene) = SCENE.as_mut() {
+                                    if scene.dirty {
+                                        match persist_world(app, scene) {
+                                            Ok(()) => app.logger.event(
+                                                "INFO",
+                                                "world_autosaved",
+                                                "reason=dirty interval_seconds=30",
+                                            ),
+                                            Err(error) => app.logger.event(
+                                                "ERROR",
+                                                "world_autosave_failed",
+                                                error.to_string(),
+                                            ),
+                                        }
+                                    }
+                                }
+                            }
+                            let world_name = app
+                                .world_metadata
+                                .as_ref()
+                                .map(|metadata| metadata.name.as_str())
+                                .unwrap_or("Unsaved Prototype");
+                            let title = wide(&format!(
                             "Voxel Engine 0.8.8 | {world_name} | Slot {} {} | block={:.2},{:.2},{:.2} speed={:.2} b/s | mine={:.1}%",
                             app.selected_block.0,
                             BlockRegistry::new().definition(app.selected_block).name,
@@ -928,17 +973,24 @@ unsafe extern "system" fn window_proc(
                                 * 20.0,
                             app.mining_session.progress_permille() as f32 / 10.0
                         ));
-                        SetWindowTextW(window, title.as_ptr());
+                            SetWindowTextW(window, title.as_ptr());
+                        }
                     }
-                    app.last_physics = Instant::now();
                 }
+                // Keep the title backdrop visibly alive while its modal menu pauses gameplay.
+                // last_physics is reset when the title opens and remains unchanged until play.
+                let render_yaw = if TITLE_FORM.is_some() {
+                    app.yaw + app.last_physics.elapsed().as_secs_f32() * 0.12
+                } else {
+                    app.yaw
+                };
                 let direction = Vec3::new(
-                    app.pitch.cos() * app.yaw.cos(),
+                    app.pitch.cos() * render_yaw.cos(),
                     app.pitch.sin(),
-                    app.pitch.cos() * app.yaw.sin(),
+                    app.pitch.cos() * render_yaw.sin(),
                 );
                 if wparam == RENDER_TIMER_ID {
-                    let alpha = (app.last_physics.elapsed().as_secs_f32() / 0.05).clamp(0.0, 1.0);
+                    let alpha = app.physics_clock.interpolation_alpha();
                     let transform = app.player.previous_transform;
                     let current = app.player.transform;
                     let position = Vec3::new(
@@ -964,11 +1016,6 @@ unsafe extern "system" fn window_proc(
                             scene,
                         ));
                     }
-                    app.logger.event(
-                        "TRACE",
-                        "frame_rendered",
-                        format!("width={} height={}", app.width, app.height),
-                    );
                     InvalidateRect(window, null(), 0);
                 }
             }
@@ -1558,6 +1605,17 @@ unsafe fn open_title_form(window: Hwnd) {
     controls.push(create_form_control(
         window,
         "STATIC",
+        "",
+        SS_WHITERECT,
+        left,
+        top,
+        width,
+        height,
+        0,
+    ));
+    controls.push(create_form_control(
+        window,
+        "STATIC",
         "Voxel Engine",
         0,
         left + 32,
@@ -1799,6 +1857,14 @@ unsafe fn create_form_control(
 ) -> Hwnd {
     let class = wide(class_name);
     let label = wide(label);
+    let style =
+        if class_name == "BUTTON" && matches!(style & 0x0f, BS_PUSHBUTTON | BS_DEFPUSHBUTTON) {
+            style | BS_OWNERDRAW
+        } else if class_name == "STATIC" && style == SS_WHITERECT {
+            SS_OWNERDRAW
+        } else {
+            style
+        };
     CreateWindowExW(
         0,
         class.as_ptr(),
@@ -2132,6 +2198,17 @@ unsafe fn open_pause_form_with_capture(
     controls.push(create_form_control(
         window,
         "STATIC",
+        "",
+        SS_WHITERECT,
+        left,
+        top,
+        width,
+        height,
+        0,
+    ));
+    controls.push(create_form_control(
+        window,
+        "STATIC",
         "Paused",
         0,
         left + 24,
@@ -2357,6 +2434,17 @@ unsafe fn open_death_form(window: Hwnd) {
     controls.push(create_form_control(
         window,
         "STATIC",
+        "",
+        SS_WHITERECT,
+        left,
+        top,
+        width,
+        height,
+        0,
+    ));
+    controls.push(create_form_control(
+        window,
+        "STATIC",
         "You died",
         0,
         left + 24,
@@ -2573,6 +2661,17 @@ unsafe fn open_options_form(window: Hwnd, return_to_title: bool) {
     let top = ((client.bottom - height) / 2).max(12);
     let current_settings = APP.as_ref().map(|app| app.settings).unwrap_or_default();
     let mut controls = Vec::new();
+    controls.push(create_form_control(
+        window,
+        "STATIC",
+        "",
+        SS_WHITERECT,
+        left,
+        top,
+        width,
+        height,
+        0,
+    ));
     controls.push(create_form_control(
         window,
         "STATIC",
@@ -4656,6 +4755,7 @@ pub fn run(logger: Option<Logger>) {
             settings,
             settings_store,
             last_physics: Instant::now(),
+            physics_clock: FixedStepClock::default(),
             gpu: None,
             selected_block: initial_player.selected_block,
             hotbar_scroll_remainder: 0,
@@ -5590,6 +5690,184 @@ unsafe fn fill_hud_rect(hdc: Hdc, rect: Rect, color: u32) {
         FillRect(hdc, &rect, brush);
         DeleteObject(brush);
     }
+}
+
+unsafe fn menu_texture_brush(button: bool) -> *mut c_void {
+    let cached = if button {
+        &BUTTON_TEXTURE_BRUSH
+    } else {
+        &PANEL_TEXTURE_BRUSH
+    };
+    *cached.get_or_init(|| {
+        let mut pixels = Vec::with_capacity(16 * 16 * 4);
+        for y in 0..16u32 {
+            for x in 0..16u32 {
+                let fleck = (x * 13 + y * 7 + (x ^ y) * 3) % 29 == 0;
+                let seam = x % 8 == 0 || y % 8 == 0;
+                let color = if button {
+                    if fleck {
+                        rgb(59, 78, 83)
+                    } else if seam {
+                        rgb(31, 43, 50)
+                    } else {
+                        rgb(40, 54, 62)
+                    }
+                } else if fleck {
+                    rgb(45, 59, 63)
+                } else if seam {
+                    rgb(20, 29, 35)
+                } else {
+                    rgb(29, 40, 46)
+                };
+                pixels.extend_from_slice(&color.to_le_bytes());
+            }
+        }
+        let bitmap = CreateBitmap(16, 16, 1, 32, pixels.as_ptr() as *const c_void);
+        if bitmap.is_null() {
+            return 0;
+        }
+        let brush = CreatePatternBrush(bitmap);
+        DeleteObject(bitmap);
+        brush as usize
+    }) as *mut c_void
+}
+
+unsafe fn draw_menu_panel(hdc: Hdc, rect: Rect) {
+    let texture = menu_texture_brush(false);
+    if !texture.is_null() {
+        FillRect(hdc, &rect, texture);
+    }
+    let border = rgb(103, 130, 137);
+    let accent = rgb(185, 153, 94);
+    fill_hud_rect(
+        hdc,
+        Rect {
+            left: rect.left,
+            top: rect.top,
+            right: rect.right,
+            bottom: rect.top + 3,
+        },
+        accent,
+    );
+    fill_hud_rect(
+        hdc,
+        Rect {
+            left: rect.left,
+            top: rect.top + 3,
+            right: rect.left + 2,
+            bottom: rect.bottom,
+        },
+        border,
+    );
+    fill_hud_rect(
+        hdc,
+        Rect {
+            left: rect.right - 2,
+            top: rect.top + 3,
+            right: rect.right,
+            bottom: rect.bottom,
+        },
+        border,
+    );
+    fill_hud_rect(
+        hdc,
+        Rect {
+            left: rect.left + 2,
+            top: rect.bottom - 2,
+            right: rect.right - 2,
+            bottom: rect.bottom,
+        },
+        rgb(15, 22, 27),
+    );
+}
+
+unsafe fn draw_menu_button(item: &mut DrawItemStruct) {
+    let rect = item.item_rect;
+    let inset = Rect {
+        left: rect.left + 2,
+        top: rect.top + 2,
+        right: rect.right - 2,
+        bottom: rect.bottom - 2,
+    };
+    let texture = menu_texture_brush(true);
+    if !texture.is_null() {
+        FillRect(item.hdc, &inset, texture);
+    }
+    let pressed = item.item_state & ODS_SELECTED != 0;
+    let disabled = item.item_state & ODS_DISABLED != 0;
+    let frame = if item.item_state & ODS_FOCUS != 0 {
+        rgb(224, 190, 117)
+    } else if pressed {
+        rgb(64, 102, 111)
+    } else {
+        rgb(108, 137, 143)
+    };
+    fill_hud_rect(
+        item.hdc,
+        Rect {
+            left: rect.left,
+            top: rect.top,
+            right: rect.right,
+            bottom: rect.top + 2,
+        },
+        frame,
+    );
+    fill_hud_rect(
+        item.hdc,
+        Rect {
+            left: rect.left,
+            top: rect.top + 2,
+            right: rect.left + 2,
+            bottom: rect.bottom - 2,
+        },
+        frame,
+    );
+    fill_hud_rect(
+        item.hdc,
+        Rect {
+            left: rect.right - 2,
+            top: rect.top + 2,
+            right: rect.right,
+            bottom: rect.bottom - 2,
+        },
+        frame,
+    );
+    fill_hud_rect(
+        item.hdc,
+        Rect {
+            left: rect.left + 2,
+            top: rect.bottom - 2,
+            right: rect.right - 2,
+            bottom: rect.bottom,
+        },
+        rgb(17, 23, 28),
+    );
+
+    let length = GetWindowTextLengthW(item.item_window).max(0) as usize;
+    let mut label = vec![0u16; length + 1];
+    GetWindowTextW(item.item_window, label.as_mut_ptr(), label.len() as i32);
+    let mut text_rect = Rect {
+        left: inset.left + 8,
+        top: inset.top + if pressed { 2 } else { 0 },
+        right: inset.right - 8,
+        bottom: inset.bottom,
+    };
+    SetBkMode(item.hdc, TRANSPARENT);
+    SetTextColor(
+        item.hdc,
+        if disabled {
+            rgb(139, 148, 150)
+        } else {
+            rgb(238, 241, 235)
+        },
+    );
+    DrawTextW(
+        item.hdc,
+        label.as_ptr(),
+        -1,
+        &mut text_rect,
+        DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+    );
 }
 
 const fn rgb(red: u8, green: u8, blue: u8) -> u32 {

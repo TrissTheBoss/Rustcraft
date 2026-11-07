@@ -9,7 +9,8 @@ use crate::world_store::{atomic_write, WorldStore};
 const MAGIC: &[u8; 8] = b"VOXSET01";
 const LEGACY_VERSION: u16 = 1;
 const BINDINGS_VERSION: u16 = 2;
-const FORMAT_VERSION: u16 = 3;
+const PREVIOUS_FORMAT_VERSION: u16 = 3;
+const FORMAT_VERSION: u16 = 4;
 const LEGACY_ENCODED_LEN: usize = 19;
 const BINDINGS_ENCODED_LEN: usize = 33;
 const ENCODED_LEN: usize = 35;
@@ -115,7 +116,8 @@ pub struct KeyBindings {
 impl Default for KeyBindings {
     fn default() -> Self {
         Self {
-            keys: [0x57, 0x53, 0x41, 0x44, 0x20, 0x11, 0x10],
+            // Java-style defaults: Space jump, Shift sneak, Ctrl sprint.
+            keys: [0x57, 0x53, 0x41, 0x44, 0x20, 0x10, 0x11],
         }
     }
 }
@@ -255,6 +257,7 @@ impl Settings {
         let (expected_len, checksum_offset) = match version {
             LEGACY_VERSION => (LEGACY_ENCODED_LEN, 15),
             BINDINGS_VERSION => (BINDINGS_ENCODED_LEN, 29),
+            PREVIOUS_FORMAT_VERSION => (ENCODED_LEN, 31),
             FORMAT_VERSION => (ENCODED_LEN, 31),
             _ => {
                 return SettingsLoad {
@@ -320,9 +323,17 @@ impl Settings {
                 warnings.push(SettingsWarning::InvalidKeyBindings);
                 bindings = defaults.key_bindings;
             }
+            if version <= PREVIOUS_FORMAT_VERSION
+                && bindings.key(BindingAction::Sneak) == 0x11
+                && bindings.key(BindingAction::Sprint) == 0x10
+            {
+                // Earlier builds shipped the Ctrl/Shift assignments backwards.
+                bindings.keys[BindingAction::Sneak.index()] = 0x10;
+                bindings.keys[BindingAction::Sprint.index()] = 0x11;
+            }
             bindings
         };
-        let sprint_behavior = if version < FORMAT_VERSION {
+        let sprint_behavior = if version < PREVIOUS_FORMAT_VERSION {
             HoldToggle::Hold
         } else if let Some(value) = HoldToggle::decode(bytes[29]) {
             value
@@ -330,7 +341,7 @@ impl Settings {
             warnings.push(SettingsWarning::InvalidSprintBehavior);
             HoldToggle::Hold
         };
-        let sneak_behavior = if version < FORMAT_VERSION {
+        let sneak_behavior = if version < PREVIOUS_FORMAT_VERSION {
             HoldToggle::Hold
         } else if let Some(value) = HoldToggle::decode(bytes[30]) {
             value
@@ -593,6 +604,34 @@ mod tests {
     }
 
     #[test]
+    fn previous_default_sprint_and_sneak_bindings_migrate_to_java_style_keys() {
+        let mut old_bindings = KeyBindings::default();
+        old_bindings.keys[BindingAction::Sneak.index()] = 0x11;
+        old_bindings.keys[BindingAction::Sprint.index()] = 0x10;
+        let old_settings = Settings {
+            key_bindings: old_bindings,
+            sprint_behavior: HoldToggle::Toggle,
+            ..Settings::default()
+        };
+        let mut bytes = old_settings.encode().unwrap();
+        bytes[8..10].copy_from_slice(&PREVIOUS_FORMAT_VERSION.to_le_bytes());
+        refresh_checksum(&mut bytes);
+
+        let loaded = Settings::decode(&bytes);
+        assert_eq!(loaded.settings.key_bindings, KeyBindings::default());
+        assert_eq!(loaded.settings.key_bindings.key(BindingAction::Sneak), 0x10);
+        assert_eq!(
+            loaded.settings.key_bindings.key(BindingAction::Sprint),
+            0x11
+        );
+        assert_eq!(loaded.settings.sprint_behavior, HoldToggle::Toggle);
+        assert_eq!(
+            loaded.warnings,
+            vec![SettingsWarning::MigratedVersion(PREVIOUS_FORMAT_VERSION)]
+        );
+    }
+
+    #[test]
     fn hold_and_toggle_modes_apply_key_press_and_release_rules() {
         assert!(HoldToggle::Hold.after_key_down(false, true));
         assert!(!HoldToggle::Hold.after_key_up(true));
@@ -681,10 +720,10 @@ mod tests {
             vec![SettingsWarning::CorruptFile]
         );
         let mut future = Settings::default().encode().unwrap();
-        future[8..10].copy_from_slice(&4u16.to_le_bytes());
+        future[8..10].copy_from_slice(&5u16.to_le_bytes());
         assert_eq!(
             Settings::decode(&future).warnings,
-            vec![SettingsWarning::UnsupportedVersion(4)]
+            vec![SettingsWarning::UnsupportedVersion(5)]
         );
     }
 

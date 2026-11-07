@@ -6,6 +6,7 @@
 use crate::blocks::{Aabb, CollisionShape};
 use crate::entity::Transform;
 use crate::grid::{PLAYER_HALF_HEIGHT, PLAYER_HALF_WIDTH};
+use std::time::Duration;
 
 pub const TICKS_PER_SECOND: f64 = 20.0;
 pub const WALK_ACCELERATION: f64 = 0.098;
@@ -18,8 +19,39 @@ pub const GRAVITY: f64 = 0.08;
 pub const JUMP_IMPULSE: f64 = 0.45;
 pub const FLIGHT_ACCELERATION: f64 = 0.049;
 pub const FLIGHT_SPEED_MULTIPLIER: f64 = 2.0;
+pub const FLIGHT_SPRINT_MULTIPLIER: f64 = 2.0;
 pub const WALK_SPEED_PER_TICK: f64 = 4.317 / TICKS_PER_SECOND;
 pub const SPRINT_SPEED_PER_TICK: f64 = 5.612 / TICKS_PER_SECOND;
+const FIXED_TICK: Duration = Duration::from_millis(50);
+const MAX_CATCH_UP_TICKS: u32 = 5;
+
+/// Keeps simulation time at 20 Hz even when the window/render loop is delayed.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct FixedStepClock {
+    accumulated: Duration,
+}
+
+impl FixedStepClock {
+    pub fn advance(&mut self, elapsed: Duration) -> u32 {
+        self.accumulated = self.accumulated.saturating_add(elapsed);
+        let steps = (self.accumulated.as_nanos() / FIXED_TICK.as_nanos()) as u32;
+        if steps > MAX_CATCH_UP_TICKS {
+            self.accumulated =
+                Duration::from_nanos((self.accumulated.as_nanos() % FIXED_TICK.as_nanos()) as u64);
+            return MAX_CATCH_UP_TICKS;
+        }
+        self.accumulated -= FIXED_TICK * steps;
+        steps
+    }
+
+    pub fn interpolation_alpha(self) -> f32 {
+        (self.accumulated.as_secs_f32() / FIXED_TICK.as_secs_f32()).clamp(0.0, 1.0)
+    }
+
+    pub fn reset(&mut self) {
+        self.accumulated = Duration::ZERO;
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum GameMode {
@@ -122,6 +154,11 @@ impl PlayerController {
         ];
         let acceleration = if flying {
             FLIGHT_ACCELERATION
+                * if input.sprint {
+                    FLIGHT_SPRINT_MULTIPLIER
+                } else {
+                    1.0
+                }
         } else if input.sprint {
             SPRINT_ACCELERATION
         } else {
@@ -318,6 +355,52 @@ mod tests {
             );
         }
         assert!(sprinting.transform.x > walking);
+    }
+
+    #[test]
+    fn fixed_step_clock_catches_up_and_reports_interpolation_remainder() {
+        let mut clock = FixedStepClock::default();
+        assert_eq!(clock.advance(Duration::from_millis(20)), 0);
+        assert!((clock.interpolation_alpha() - 0.4).abs() < 1.0e-6);
+        assert_eq!(clock.advance(Duration::from_millis(130)), 3);
+        assert!(clock.interpolation_alpha() < 1.0e-6);
+        assert_eq!(clock.advance(Duration::from_secs(10)), MAX_CATCH_UP_TICKS);
+        assert!(clock.interpolation_alpha() < 1.0);
+    }
+
+    #[test]
+    fn creative_flight_sprint_increases_horizontal_and_vertical_speed() {
+        let mut flying = PlayerController::new(Transform {
+            x: 0.0,
+            y: 10.0,
+            z: 0.0,
+        });
+        flying.mode = GameMode::Creative;
+        flying.flying = true;
+        let mut sprint_flying = flying;
+        for _ in 0..20 {
+            flying.tick(
+                MovementInput {
+                    forward: 1.0,
+                    jump: true,
+                    ..Default::default()
+                },
+                0.0,
+                |_, _, _| false,
+            );
+            sprint_flying.tick(
+                MovementInput {
+                    forward: 1.0,
+                    jump: true,
+                    sprint: true,
+                    ..Default::default()
+                },
+                0.0,
+                |_, _, _| false,
+            );
+        }
+        assert!(sprint_flying.transform.x > flying.transform.x);
+        assert!(sprint_flying.transform.y > flying.transform.y);
     }
 
     #[test]
