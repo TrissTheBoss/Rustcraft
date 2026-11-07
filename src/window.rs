@@ -31,6 +31,7 @@ use crate::render::{
 use crate::settings::{
     BindingAction, HoldToggle, KeyBindingError, KeyBindings, Settings, SettingsStore,
 };
+use crate::survival::PlayerVitals;
 use crate::terrain::{TerrainGenerator, ROCK, SOIL, SURFACE};
 use crate::world::{ChunkPos, CHUNK_SIZE};
 use crate::world_store::{
@@ -50,6 +51,7 @@ const WM_CLOSE: u32 = 0x0010;
 const WM_PAINT: u32 = 0x000F;
 const WM_ERASEBKGND: u32 = 0x0014;
 const WM_TIMER: u32 = 0x0113;
+const WM_APP_DEATH: u32 = 0x8001;
 const WM_KEYDOWN: u32 = 0x0100;
 const WM_KEYUP: u32 = 0x0101;
 const WM_MOUSEMOVE: u32 = 0x0200;
@@ -63,6 +65,8 @@ const DIB_RGB_COLORS: u32 = 0;
 const SRCCOPY: u32 = 0x00CC0020;
 const TIMER_ID: usize = 1;
 const RENDER_TIMER_ID: usize = 2;
+const DEATH_RESPAWN_ID: usize = 9001;
+const DEATH_TITLE_ID: usize = 9002;
 const MENU_SAVE_WORLD: usize = 1001;
 const MENU_CREATE_WORLD: usize = 1002;
 const MENU_QUIT: usize = 1003;
@@ -304,6 +308,7 @@ static mut TITLE_FORM: Option<TitleForm> = None;
 static mut INVENTORY_FORM: Option<InventoryForm> = None;
 static mut PAUSE_FORM: Option<PauseForm> = None;
 static mut OPTIONS_FORM: Option<OptionsForm> = None;
+static mut DEATH_FORM: Option<DeathForm> = None;
 
 struct Scene {
     world: crate::world::World,
@@ -333,6 +338,7 @@ struct AppState {
     settings: Settings,
     settings_store: Option<SettingsStore>,
     player: PlayerController,
+    vitals: PlayerVitals,
     gpu: Option<GpuRenderer>,
     last_physics: Instant,
     selected_block: crate::world::BlockId,
@@ -410,6 +416,11 @@ struct OptionsForm {
     return_to_title: bool,
 }
 
+struct DeathForm {
+    controls: Vec<Hwnd>,
+    status_label: Hwnd,
+}
+
 const MF_STRING: u32 = 0x0000;
 const MF_SEPARATOR: u32 = 0x0800;
 const MF_POPUP: u32 = 0x0010;
@@ -439,6 +450,9 @@ unsafe extern "system" fn window_proc(
                 return 0;
             }
             if handle_pause_command(window, command) {
+                return 0;
+            }
+            if handle_death_command(window, command) {
                 return 0;
             }
             if WORLD_FORM.is_some() && command == DIALOG_IDCANCEL {
@@ -546,6 +560,7 @@ unsafe extern "system" fn window_proc(
         }
         WM_CLOSE => {
             destroy_title_form();
+            destroy_death_form();
             if INVENTORY_FORM.is_some() {
                 close_inventory_form(window);
                 return 0;
@@ -608,6 +623,10 @@ unsafe extern "system" fn window_proc(
             0
         }
         WM_ERASEBKGND => 1,
+        WM_APP_DEATH => {
+            open_death_form(window);
+            0
+        }
         WM_TIMER => {
             if let Some(app) = APP.as_mut() {
                 if wparam == TIMER_ID && !app.dialog_open {
@@ -636,8 +655,10 @@ unsafe extern "system" fn window_proc(
                         };
                         app.toggle_flight_pending = false;
                         app.jump_was_pressed = app.input.is_pressed(InputKey::Up);
-                        app.player
-                            .tick_with_collision_shapes(input, app.yaw as f64, |x, y, z| {
+                        let fall_distance = app.player.tick_with_collision_shapes(
+                            input,
+                            app.yaw as f64,
+                            |x, y, z| {
                                 let block_position = [x, y, z];
                                 match (
                                     scene.world.block_at(block_position),
@@ -648,7 +669,30 @@ unsafe extern "system" fn window_proc(
                                     }
                                     _ => crate::blocks::CollisionShape::EMPTY,
                                 }
-                            });
+                            },
+                        );
+                        if let Some(distance) = fall_distance {
+                            if matches!(app.player.mode, GameMode::Survival | GameMode::Adventure) {
+                                let outcome = app.vitals.apply_fall_damage(distance);
+                                if outcome.applied > 0 {
+                                    app.logger.event(
+                                        "INFO",
+                                        "fall_damage",
+                                        format!(
+                                            "distance={distance:.2} damage={} health={}",
+                                            outcome.applied,
+                                            app.vitals.health()
+                                        ),
+                                    );
+                                    if let Some(scene) = SCENE.as_mut() {
+                                        scene.dirty = true;
+                                    }
+                                }
+                                if outcome.became_dead {
+                                    PostMessageW(window, WM_APP_DEATH, 0, 0);
+                                }
+                            }
+                        }
                         let center = (
                             (app.player.transform.x / CHUNK_SIZE as f64).floor() as i32,
                             (app.player.transform.z / CHUNK_SIZE as f64).floor() as i32,
@@ -938,6 +982,9 @@ unsafe extern "system" fn window_proc(
                 {
                     close_pause_form(window);
                 }
+                return 0;
+            }
+            if DEATH_FORM.is_some() {
                 return 0;
             }
             if wparam as u32 == VK_E && message == WM_KEYDOWN {
@@ -1575,6 +1622,13 @@ unsafe fn close_title_form(window: Hwnd, enter_game: bool) {
     }
     destroy_title_form();
     if let Some(app) = APP.as_mut() {
+        if enter_game && app.vitals.is_dead() {
+            app.dialog_open = true;
+            app.input.clear();
+            app.last_physics = Instant::now();
+            PostMessageW(window, WM_APP_DEATH, 0, 0);
+            return;
+        }
         app.dialog_open = false;
         app.input.clear();
         app.last_physics = Instant::now();
@@ -2197,6 +2251,202 @@ unsafe fn close_pause_form(window: Hwnd) {
 #[allow(static_mut_refs)]
 unsafe fn destroy_pause_form() {
     if let Some(form) = PAUSE_FORM.take() {
+        for control in form.controls.into_iter().rev() {
+            if !control.is_null() {
+                DestroyWindow(control);
+            }
+        }
+    }
+}
+
+#[allow(static_mut_refs)]
+unsafe fn open_death_form(window: Hwnd) {
+    if DEATH_FORM.is_some() || !APP.as_ref().is_some_and(|app| app.vitals.is_dead()) {
+        return;
+    }
+    let mut client = Rect {
+        left: 0,
+        top: 0,
+        right: 0,
+        bottom: 0,
+    };
+    GetClientRect(window, &mut client);
+    let width = 380;
+    let height = 210;
+    let left = ((client.right - width) / 2).max(12);
+    let top = ((client.bottom - height) / 2).max(12);
+    let mut controls = Vec::new();
+    controls.push(create_form_control(
+        window,
+        "STATIC",
+        "You died",
+        0,
+        left + 24,
+        top + 16,
+        width - 48,
+        32,
+        0,
+    ));
+    let status_label = create_form_control(
+        window,
+        "STATIC",
+        "Prototype death screen. Inventory is retained on respawn.",
+        0,
+        left + 24,
+        top + 50,
+        width - 48,
+        34,
+        0,
+    );
+    controls.push(status_label);
+    let respawn = create_form_control(
+        window,
+        "BUTTON",
+        "Respawn",
+        BS_DEFPUSHBUTTON | WS_TABSTOP,
+        left + 24,
+        top + 96,
+        width - 48,
+        34,
+        DEATH_RESPAWN_ID,
+    );
+    controls.push(respawn);
+    controls.push(create_form_control(
+        window,
+        "BUTTON",
+        "Save & Return to Title",
+        BS_PUSHBUTTON | WS_TABSTOP,
+        left + 24,
+        top + 138,
+        width - 48,
+        34,
+        DEATH_TITLE_ID,
+    ));
+    if controls.iter().any(|control| control.is_null()) {
+        for control in controls
+            .into_iter()
+            .rev()
+            .filter(|control| !control.is_null())
+        {
+            DestroyWindow(control);
+        }
+        return;
+    }
+    DEATH_FORM = Some(DeathForm {
+        controls,
+        status_label,
+    });
+    if let Some(app) = APP.as_mut() {
+        app.dialog_open = true;
+        app.input.clear();
+        app.breaking_held = false;
+        app.mining_session.reset();
+        app.cursor_locked = false;
+        app.last_physics = Instant::now();
+    }
+    ClipCursor(null());
+    ShowCursor(1);
+    if !respawn.is_null() {
+        SetFocus(respawn);
+    }
+}
+
+#[allow(static_mut_refs)]
+unsafe fn handle_death_command(window: Hwnd, command: usize) -> bool {
+    if DEATH_FORM.is_none() {
+        return false;
+    }
+    match command {
+        DEATH_RESPAWN_ID => respawn_player(window),
+        DEATH_TITLE_ID => {
+            let result = match (APP.as_mut(), SCENE.as_mut()) {
+                (Some(app), Some(scene)) if scene.dirty => persist_world(app, scene),
+                _ => Ok(()),
+            };
+            if let Err(error) = result {
+                if let Some(form) = DEATH_FORM.as_ref() {
+                    let text = wide(&format!("Could not save world: {error}"));
+                    SetWindowTextW(form.status_label, text.as_ptr());
+                }
+                return true;
+            }
+            destroy_death_form();
+            if let Some(app) = APP.as_mut() {
+                app.dialog_open = false;
+                app.last_physics = Instant::now();
+            }
+            open_title_form(window);
+        }
+        DIALOG_IDCANCEL => {}
+        _ => {}
+    }
+    true
+}
+
+#[allow(static_mut_refs)]
+unsafe fn respawn_player(window: Hwnd) {
+    let previous_player = APP.as_ref().map(|app| (app.player, app.vitals));
+    let previous_scene_dirty = SCENE.as_ref().is_some_and(|scene| scene.dirty);
+    let result = (|| {
+        let (Some(app), Some(scene)) = (APP.as_mut(), SCENE.as_mut()) else {
+            return Err("world is unavailable".to_string());
+        };
+        let x = app.player.transform.x.floor() as i32;
+        let z = app.player.transform.z.floor() as i32;
+        let mut y = 0;
+        for candidate in 0..128 {
+            if BlockRegistry::new().is_solid(
+                scene
+                    .world
+                    .block_at([x, candidate, z])
+                    .unwrap_or(crate::world::BlockId(0)),
+            ) {
+                y = candidate + 1;
+            }
+        }
+        app.player.transform = crate::entity::Transform {
+            x: x as f64 + 0.5,
+            y: y as f64 + 1.0 + crate::grid::PLAYER_HALF_HEIGHT,
+            z: z as f64 + 0.5,
+        };
+        app.player.previous_transform = app.player.transform;
+        app.player.velocity = [0.0; 3];
+        app.player.grounded = false;
+        app.player.fall_distance = 0.0;
+        app.player.fall_damage_armed = false;
+        app.player.flying = false;
+        app.vitals.respawn();
+        scene.dirty = true;
+        persist_world(app, scene).map_err(|error| error.to_string())
+    })();
+    if let Err(error) = result {
+        if let (Some((player, vitals)), Some(app)) = (previous_player, APP.as_mut()) {
+            app.player = player;
+            app.vitals = vitals;
+        }
+        if let Some(scene) = SCENE.as_mut() {
+            scene.dirty = previous_scene_dirty;
+        }
+        if let Some(form) = DEATH_FORM.as_ref() {
+            let text = wide(&format!("Respawn save failed: {error}"));
+            SetWindowTextW(form.status_label, text.as_ptr());
+        }
+        return;
+    }
+    destroy_death_form();
+    if let Some(app) = APP.as_mut() {
+        app.dialog_open = false;
+        app.input.clear();
+        app.last_physics = Instant::now();
+        app.cursor_locked = true;
+    }
+    ShowCursor(0);
+    lock_cursor(window);
+}
+
+#[allow(static_mut_refs)]
+unsafe fn destroy_death_form() {
+    if let Some(form) = DEATH_FORM.take() {
         for control in form.controls.into_iter().rev() {
             if !control.is_null() {
                 DestroyWindow(control);
@@ -4058,6 +4308,7 @@ unsafe fn activate_world(window: Hwnd, app: &mut AppState, saved: crate::world_s
     let terrain_seed = saved.metadata.terrain_seed;
     let player_position = saved.player.position;
     app.player = player_controller(&saved.player, saved.metadata.game_mode);
+    app.vitals = PlayerVitals::from_saved_health(saved.player.health).unwrap_or_default();
     app.selected_block = saved.player.selected_block;
     app.inventory = saved.player.inventory;
     app.drops = saved.player.drops.clone();
@@ -4118,6 +4369,9 @@ unsafe fn activate_world(window: Hwnd, app: &mut AppState, saved: crate::world_s
     SetWindowTextW(window, title.as_ptr());
     InvalidateRect(window, null(), 0);
     app.logger.event("INFO", "world_opened", world_name);
+    if app.vitals.is_dead() {
+        PostMessageW(window, WM_APP_DEATH, 0, 0);
+    }
 }
 
 #[allow(static_mut_refs)]
@@ -4238,6 +4492,7 @@ pub fn run(logger: Option<Logger>) {
             dialog_open: false,
             last_save: Instant::now(),
             player,
+            vitals: PlayerVitals::from_saved_health(initial_player.health).unwrap_or_default(),
         });
         if let Some(app) = APP.as_ref() {
             app.logger.event(
@@ -4324,6 +4579,7 @@ pub fn run(logger: Option<Logger>) {
                     || TITLE_FORM.is_some()
                     || INVENTORY_FORM.is_some()
                     || PAUSE_FORM.is_some()
+                    || DEATH_FORM.is_some()
                     || OPTIONS_FORM.is_some())
                 && IsDialogMessageW(window, &message) != 0
             {
@@ -4765,6 +5021,8 @@ fn player_controller(snapshot: &PlayerSnapshot, mode: StoredGameMode) -> PlayerC
     };
     player.flying = snapshot.flying;
     player.grounded = snapshot.grounded;
+    player.fall_distance = snapshot.fall_distance;
+    player.fall_damage_armed = snapshot.fall_damage_armed;
     player
 }
 
@@ -4792,6 +5050,9 @@ fn current_player_snapshot(app: &AppState) -> PlayerSnapshot {
         selected_block: app.selected_block,
         inventory: app.inventory,
         drops: app.drops.clone(),
+        health: app.vitals.health(),
+        fall_distance: app.player.fall_distance,
+        fall_damage_armed: app.player.fall_damage_armed,
     }
 }
 

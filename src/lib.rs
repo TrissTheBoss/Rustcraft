@@ -16,6 +16,7 @@ pub mod render;
 pub mod resource;
 pub mod settings;
 pub mod simulation;
+pub mod survival;
 pub mod terrain;
 #[cfg(windows)]
 pub mod window;

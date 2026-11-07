@@ -16,7 +16,8 @@ const SAVE_MAGIC_V3: &[u8; 8] = b"VXSAVE03";
 const SAVE_MAGIC_V4: &[u8; 8] = b"VXSAVE04";
 const SAVE_MAGIC_V5: &[u8; 8] = b"VXSAVE05";
 const SAVE_MAGIC_V6: &[u8; 8] = b"VXSAVE06";
-const SAVE_VERSION: u32 = 6;
+const SAVE_MAGIC_V7: &[u8; 8] = b"VXSAVE07";
+const SAVE_VERSION: u32 = 7;
 const SAVE_FILE: &str = "world.vxs";
 const BACKUP_DIR: &str = "backups";
 const MAX_NAME_BYTES: usize = 128;
@@ -100,6 +101,9 @@ pub struct PlayerSnapshot {
     pub pitch: f32,
     pub flying: bool,
     pub grounded: bool,
+    pub health: u8,
+    pub fall_distance: f64,
+    pub fall_damage_armed: bool,
     pub selected_block: BlockId,
     pub inventory: Inventory,
     pub drops: ItemDrops,
@@ -114,6 +118,9 @@ impl Default for PlayerSnapshot {
             pitch: -0.4,
             flying: false,
             grounded: false,
+            health: crate::survival::MAX_HEALTH,
+            fall_distance: 0.0,
+            fall_damage_armed: false,
             selected_block: BlockId(1),
             inventory: Inventory::default(),
             drops: ItemDrops::default(),
@@ -803,6 +810,9 @@ fn validate_player(player: &PlayerSnapshot) -> io::Result<()> {
         || !player.yaw.is_finite()
         || !player.pitch.is_finite()
         || player.pitch.abs() > std::f32::consts::FRAC_PI_2
+        || player.health > crate::survival::MAX_HEALTH
+        || !player.fall_distance.is_finite()
+        || !(0.0..=1024.0).contains(&player.fall_distance)
     {
         return Err(invalid_input("invalid player snapshot values"));
     }
@@ -831,7 +841,7 @@ fn encode_save(
     let world_len = u64::try_from(world_bytes.len())
         .map_err(|_| invalid_input("world payload length is invalid"))?;
     let mut output = Vec::with_capacity(world_bytes.len() + 96 + name.len());
-    output.write_all(SAVE_MAGIC_V6)?;
+    output.write_all(SAVE_MAGIC_V7)?;
     output.write_all(&SAVE_VERSION.to_le_bytes())?;
     output.write_all(&name_len.to_le_bytes())?;
     output.write_all(name)?;
@@ -852,6 +862,9 @@ fn encode_save(
     output.write_all(&player.selected_block.0.to_le_bytes())?;
     write_inventory(&mut output, &player.inventory)?;
     write_drops(&mut output, &player.drops)?;
+    output.write_all(&[player.health])?;
+    output.write_all(&player.fall_distance.to_le_bytes())?;
+    output.write_all(&[u8::from(player.fall_damage_armed)])?;
     output.write_all(&world_len.to_le_bytes())?;
     output.write_all(world_bytes)?;
     output.write_all(&checksum64(&output).to_le_bytes())?;
@@ -890,6 +903,11 @@ fn decode_save(bytes: &[u8], id: &str) -> io::Result<StoredWorld> {
     }
     if version >= 4 {
         player.drops = read_drops(&mut input)?;
+    }
+    if version >= 7 {
+        player.health = read_byte(&mut input)?;
+        player.fall_distance = read_f64(&mut input)?;
+        player.fall_damage_armed = read_bool(&mut input)?;
     }
     validate_player(&player).map_err(|_| invalid_data("invalid player snapshot values"))?;
     let world_len = read_u64(&mut input)?;
@@ -943,6 +961,7 @@ fn read_metadata<R: Read>(input: &mut R, id: &str) -> io::Result<(WorldMetadata,
         4 => &magic == SAVE_MAGIC_V4,
         5 => &magic == SAVE_MAGIC_V5,
         6 => &magic == SAVE_MAGIC_V6,
+        7 => &magic == SAVE_MAGIC_V7,
         _ => false,
     };
     if !version_matches_magic {
@@ -1226,6 +1245,12 @@ fn read_bool<R: Read>(input: &mut R) -> io::Result<bool> {
     }
 }
 
+fn read_byte<R: Read>(input: &mut R) -> io::Result<u8> {
+    let mut value = [0];
+    input.read_exact(&mut value)?;
+    Ok(value[0])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1338,6 +1363,14 @@ mod tests {
         world_bytes: &[u8],
     ) -> Vec<u8> {
         let mut v5 = encode_save(metadata, player, world_bytes).unwrap();
+        let world_start = v5
+            .windows(world_bytes.len())
+            .position(|window| window == world_bytes)
+            .expect("encoded world payload is present");
+        v5.drain(world_start - 18..world_start - 8);
+        let payload_len = v5.len() - 8;
+        let checksum = checksum64(&v5[..payload_len]);
+        v5[payload_len..].copy_from_slice(&checksum.to_le_bytes());
         let name_len = u16::from_le_bytes([v5[12], v5[13]]) as usize;
         let generator_version_offset = 14 + name_len + 16;
         v5.drain(generator_version_offset..generator_version_offset + 4);
@@ -1354,6 +1387,25 @@ mod tests {
         let checksum = checksum64(&v5[..payload_len]);
         v5[payload_len..].copy_from_slice(&checksum.to_le_bytes());
         v5
+    }
+
+    fn encode_v6_fixture(
+        metadata: &WorldMetadata,
+        player: PlayerSnapshot,
+        world_bytes: &[u8],
+    ) -> Vec<u8> {
+        let mut v6 = encode_save(metadata, player, world_bytes).unwrap();
+        let world_start = v6
+            .windows(world_bytes.len())
+            .position(|window| window == world_bytes)
+            .expect("encoded world payload is present");
+        v6.drain(world_start - 18..world_start - 8);
+        v6[..8].copy_from_slice(SAVE_MAGIC_V6);
+        v6[8..12].copy_from_slice(&6u32.to_le_bytes());
+        let payload_len = v6.len() - 8;
+        let checksum = checksum64(&v6[..payload_len]);
+        v6[payload_len..].copy_from_slice(&checksum.to_le_bytes());
+        v6
     }
 
     #[test]
@@ -1391,6 +1443,9 @@ mod tests {
             pitch: -0.5,
             flying: true,
             grounded: false,
+            health: 7,
+            fall_distance: 4.5,
+            fall_damage_armed: true,
             selected_block: BlockId(3),
             inventory,
             drops,
@@ -1515,13 +1570,13 @@ mod tests {
             .unwrap();
 
         let upgraded = read_bounded(&save_path).unwrap();
-        assert_eq!(&upgraded[..8], SAVE_MAGIC_V6);
-        assert_eq!(u32::from_le_bytes(upgraded[8..12].try_into().unwrap()), 6);
+        assert_eq!(&upgraded[..8], SAVE_MAGIC_V7);
+        assert_eq!(u32::from_le_bytes(upgraded[8..12].try_into().unwrap()), 7);
         assert_eq!(store.load(&created.metadata.id).unwrap(), loaded);
     }
 
     #[test]
-    fn version_two_worlds_load_with_empty_player_items_and_upgrade_to_version_six() {
+    fn version_two_worlds_load_with_empty_player_items_and_upgrade_to_version_seven() {
         let root = TestRoot::new();
         let store = WorldStore::new(&root.0);
         let created = store
@@ -1547,8 +1602,8 @@ mod tests {
             .unwrap();
 
         let upgraded = read_bounded(&save_path).unwrap();
-        assert_eq!(&upgraded[..8], SAVE_MAGIC_V6);
-        assert_eq!(u32::from_le_bytes(upgraded[8..12].try_into().unwrap()), 6);
+        assert_eq!(&upgraded[..8], SAVE_MAGIC_V7);
+        assert_eq!(u32::from_le_bytes(upgraded[8..12].try_into().unwrap()), 7);
         assert_eq!(store.load(&created.metadata.id).unwrap(), loaded);
     }
 
@@ -1590,7 +1645,7 @@ mod tests {
             .save(&mut loaded.metadata, &loaded.world, loaded.player.clone())
             .unwrap();
         let upgraded = read_bounded(&save_path).unwrap();
-        assert_eq!(&upgraded[..8], SAVE_MAGIC_V6);
+        assert_eq!(&upgraded[..8], SAVE_MAGIC_V7);
         assert_eq!(store.load(&created.metadata.id).unwrap(), loaded);
     }
 
@@ -1644,7 +1699,38 @@ mod tests {
             .unwrap();
 
         let upgraded = read_bounded(&save_path).unwrap();
-        assert_eq!(&upgraded[..8], SAVE_MAGIC_V6);
+        assert_eq!(&upgraded[..8], SAVE_MAGIC_V7);
+        assert_eq!(store.load(&created.metadata.id).unwrap(), loaded);
+    }
+
+    #[test]
+    fn version_six_worlds_receive_default_survival_state_and_upgrade_to_seven() {
+        let root = TestRoot::new();
+        let store = WorldStore::new(&root.0);
+        let created = store
+            .create(
+                "Version Six World",
+                43,
+                StoredGameMode::Survival,
+                test_world(),
+                PlayerSnapshot::default(),
+            )
+            .unwrap();
+        let mut world_bytes = Vec::new();
+        created.world.save(&mut world_bytes).unwrap();
+        let legacy = encode_v6_fixture(&created.metadata, created.player, &world_bytes);
+        let path = store.save_path(&created.metadata.id).unwrap();
+        atomic_write(&path, &legacy).unwrap();
+
+        let mut loaded = store.load(&created.metadata.id).unwrap();
+        assert_eq!(loaded.player.health, crate::survival::MAX_HEALTH);
+        assert_eq!(loaded.player.fall_distance, 0.0);
+        assert!(!loaded.player.fall_damage_armed);
+        store
+            .save(&mut loaded.metadata, &loaded.world, loaded.player.clone())
+            .unwrap();
+        let upgraded = read_bounded(&path).unwrap();
+        assert_eq!(&upgraded[..8], SAVE_MAGIC_V7);
         assert_eq!(store.load(&created.metadata.id).unwrap(), loaded);
     }
 

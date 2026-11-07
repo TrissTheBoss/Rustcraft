@@ -58,6 +58,10 @@ The first implementation establishes testable world, entity, resource, and netwo
 
 Chunk persistence reads and writes the existing contiguous block array directly, preserving the y/z/x serialized order while avoiding coordinate indexing and bounds checks for each block. This is a focused runtime optimization of the active world core and does not change the persistence format.
 
+## 2026-11-07 — Persist provisional player survival state in save v7
+
+Save format v7 adds bounded player health and fall-distance/arming state so the current Survival prototype can resume across save/load. Versions 1-6 remain readable and default to full health with no pending fall. The current 20-point health scale, 3-block safe distance, integer damage calculation, spawn choice, death inventory retention, and respawn behavior are prototype decisions only. They require observable fixtures against the pinned Java Edition build before any conformance claim. Death is persisted through health zero; respawn is saved before leaving the death screen so a save failure cannot silently discard the dead state.
+
 ## 2026-11-06 — Fixed-step deterministic simulation
 
 Simulation advances through an explicit fixed-step accumulator and stores bodies in a `BTreeMap` so tick order is stable by entity ID. The first collision boundary is an original ground plane at y=0; richer voxel collision remains a later increment.

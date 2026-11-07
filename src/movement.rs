@@ -56,6 +56,8 @@ pub struct PlayerController {
     pub mode: GameMode,
     pub flying: bool,
     pub grounded: bool,
+    pub fall_distance: f64,
+    pub fall_damage_armed: bool,
 }
 
 impl PlayerController {
@@ -68,6 +70,8 @@ impl PlayerController {
             mode: GameMode::Survival,
             flying: false,
             grounded: false,
+            fall_distance: 0.0,
+            fall_damage_armed: false,
         }
     }
 
@@ -76,14 +80,14 @@ impl PlayerController {
         input: MovementInput,
         yaw_radians: f64,
         is_solid: impl Fn(i32, i32, i32) -> bool,
-    ) {
+    ) -> Option<f64> {
         self.tick_with_collision_shapes(input, yaw_radians, |x, y, z| {
             if is_solid(x, y, z) {
                 CollisionShape::FULL_BLOCK
             } else {
                 CollisionShape::EMPTY
             }
-        });
+        })
     }
 
     /// Advance one tick against block-local collision shapes. Empty shapes
@@ -93,7 +97,8 @@ impl PlayerController {
         input: MovementInput,
         yaw_radians: f64,
         collision_shape: impl Fn(i32, i32, i32) -> CollisionShape,
-    ) {
+    ) -> Option<f64> {
+        let was_grounded = self.grounded;
         self.previous_transform = self.transform;
         if input.toggle_flight && self.mode == GameMode::Creative {
             self.flying = !self.flying;
@@ -164,6 +169,8 @@ impl PlayerController {
                 self.velocity[2] *= scale;
             }
         }
+        let starting_y = self.transform.y;
+        self.grounded = false;
         move_axis(self, 1, &collision_shape);
         // Resolve vertical motion first. This lets a jump raise the player's
         // AABB above a one-block obstacle before horizontal collision checks,
@@ -174,6 +181,27 @@ impl PlayerController {
             self.transform.y = self.half_extents[1];
             self.velocity[1] = 0.0;
             self.grounded = true;
+        }
+        if flying {
+            self.fall_distance = 0.0;
+            self.fall_damage_armed = true;
+            return None;
+        }
+        self.fall_distance += (starting_y - self.transform.y).max(0.0);
+        if self.grounded {
+            let landing_distance = if was_grounded || !self.fall_damage_armed {
+                None
+            } else {
+                Some(self.fall_distance)
+            };
+            self.fall_distance = 0.0;
+            self.fall_damage_armed = true;
+            landing_distance
+        } else {
+            if was_grounded {
+                self.fall_damage_armed = true;
+            }
+            None
         }
     }
 }
@@ -400,6 +428,53 @@ mod tests {
             |_, _, _| false,
         );
         assert!(player.transform.y > 10.0);
+    }
+
+    #[test]
+    fn fall_distance_is_reported_on_armed_landing_but_not_initial_spawn_drop() {
+        let mut player = PlayerController::new(Transform {
+            x: 0.0,
+            y: 8.0,
+            z: 0.0,
+        });
+        let mut landing = None;
+        for _ in 0..80 {
+            landing = player.tick(Default::default(), 0.0, |_, y, _| y < 0);
+            if player.grounded {
+                break;
+            }
+        }
+        assert!(player.grounded);
+        assert!(landing.is_none());
+        assert!(player.fall_damage_armed);
+
+        player.transform.y = 8.0;
+        player.previous_transform = player.transform;
+        player.grounded = false;
+        player.velocity = [0.0; 3];
+        for _ in 0..80 {
+            landing = player.tick(Default::default(), 0.0, |_, y, _| y < 0);
+            if landing.is_some() {
+                break;
+            }
+        }
+        assert!(landing.is_some_and(|distance| distance > 6.0));
+        assert!(player.grounded);
+    }
+
+    #[test]
+    fn creative_flight_resets_fall_tracking_without_reporting_damage() {
+        let mut player = PlayerController::new(Transform {
+            x: 0.0,
+            y: 8.0,
+            z: 0.0,
+        });
+        player.mode = GameMode::Creative;
+        player.flying = true;
+        player.fall_distance = 20.0;
+        let landing = player.tick(Default::default(), 0.0, |_, _, _| false);
+        assert!(landing.is_none());
+        assert_eq!(player.fall_distance, 0.0);
     }
 
     #[test]
