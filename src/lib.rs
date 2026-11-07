@@ -14,6 +14,7 @@ pub mod movement;
 pub mod networking;
 pub mod render;
 pub mod resource;
+pub mod settings;
 pub mod simulation;
 pub mod terrain;
 #[cfg(windows)]

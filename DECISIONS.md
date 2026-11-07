@@ -26,6 +26,10 @@ The first target is the official stable Minecraft: Java Edition 26.3 release, an
 
 The Escape pause screen is modal and sets the same local simulation pause gate used by other native forms. It clears held movement/mining input, releases captured mouse state, and restores the prior capture state only on Resume. Save & Quit persists dirty world/player state first; a persistence error leaves the screen open for recovery. Closing the application from the window chrome retains the existing window-close save path. This is a functional native prototype; settings, accessibility, disconnect, and reference-specific menu behavior remain incomplete.
 
+## 2026-11-07 — Keep local settings versioned and separate from worlds
+
+Player preferences use a bounded binary schema under the application data directory, separate from world snapshots and server/world rules. The first supported settings are field of view, mouse sensitivity, and Y-axis inversion; they load at startup and apply to the camera/input path. Saves use the world's durable atomic-replacement helper. A checksum detects accidental corruption, unsupported schema versions fall back to defaults with a diagnostic, and invalid individual values fall back independently. Current bounds/defaults are engine prototype choices and remain unverified against the pinned reference. The native options screen applies settings only after validation and successful persistence; cancel/back discards unapplied edits.
+
 ## 2026-11-06 — Foundation before renderer
 
 The first implementation establishes testable world, entity, resource, and networking boundaries before selecting a renderer or platform abstraction.

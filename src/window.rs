@@ -28,6 +28,7 @@ use crate::render::{
     greedy_mesh_chunk, load_png, Camera, CpuRenderer, DirectionalLight, InputKey, InputState,
     Material, MaterialRegistry, Mesh, Renderer, Vec3,
 };
+use crate::settings::{Settings, SettingsStore};
 use crate::terrain::{TerrainGenerator, ROCK, SOIL, SURFACE};
 use crate::world::{ChunkPos, CHUNK_SIZE};
 use crate::world_store::{
@@ -84,6 +85,13 @@ const INVENTORY_DROP_ID: usize = INVENTORY_MODE_ID + 1;
 const INVENTORY_CLOSE_ID: usize = INVENTORY_DROP_ID + 1;
 const PAUSE_RESUME_ID: usize = 8100;
 const PAUSE_SAVE_QUIT_ID: usize = PAUSE_RESUME_ID + 1;
+const PAUSE_OPTIONS_ID: usize = PAUSE_SAVE_QUIT_ID + 1;
+const OPTIONS_FOV_ID: usize = 8110;
+const OPTIONS_SENSITIVITY_ID: usize = OPTIONS_FOV_ID + 1;
+const OPTIONS_INVERT_ID: usize = OPTIONS_SENSITIVITY_ID + 1;
+const OPTIONS_APPLY_ID: usize = OPTIONS_INVERT_ID + 1;
+const OPTIONS_DEFAULTS_ID: usize = OPTIONS_APPLY_ID + 1;
+const OPTIONS_BACK_ID: usize = OPTIONS_DEFAULTS_ID + 1;
 const CB_ADDSTRING: u32 = 0x0143;
 const CB_SETCURSEL: u32 = 0x014E;
 const CB_GETCURSEL: u32 = 0x0147;
@@ -262,6 +270,7 @@ static mut SCENE: Option<Scene> = None;
 static mut WORLD_FORM: Option<WorldCreationForm> = None;
 static mut INVENTORY_FORM: Option<InventoryForm> = None;
 static mut PAUSE_FORM: Option<PauseForm> = None;
+static mut OPTIONS_FORM: Option<OptionsForm> = None;
 
 struct Scene {
     world: crate::world::World,
@@ -285,6 +294,8 @@ struct AppState {
     render_width: u32,
     render_height: u32,
     logger: Logger,
+    settings: Settings,
+    settings_store: Option<SettingsStore>,
     player: PlayerController,
     gpu: Option<GpuRenderer>,
     last_physics: Instant,
@@ -336,6 +347,15 @@ struct PauseForm {
     cursor_was_locked: bool,
 }
 
+struct OptionsForm {
+    controls: Vec<Hwnd>,
+    field_of_view_edit: Hwnd,
+    sensitivity_edit: Hwnd,
+    invert_mouse_y_check: Hwnd,
+    status_label: Hwnd,
+    return_to_capture: bool,
+}
+
 const MF_STRING: u32 = 0x0000;
 const MF_SEPARATOR: u32 = 0x0800;
 const MF_POPUP: u32 = 0x0010;
@@ -356,6 +376,9 @@ unsafe extern "system" fn window_proc(
         WM_COMMAND => {
             let command = wparam & 0xffff;
             if handle_inventory_command(window, command) {
+                return 0;
+            }
+            if handle_options_command(window, command) {
                 return 0;
             }
             if handle_pause_command(window, command) {
@@ -469,6 +492,7 @@ unsafe extern "system" fn window_proc(
                 close_inventory_form(window);
                 return 0;
             }
+            destroy_options_form();
             destroy_pause_form();
             DestroyWindow(window);
             0
@@ -757,8 +781,16 @@ unsafe extern "system" fn window_proc(
                     let center_y = (client.top + client.bottom) / 2;
                     let previous_yaw = app.yaw;
                     let previous_pitch = app.pitch;
-                    app.yaw += (x - center_x) as f32 * 0.006;
-                    app.pitch = (app.pitch - (y - center_y) as f32 * 0.006).clamp(-1.45, 1.45);
+                    let sensitivity = app.settings.mouse_sensitivity_permille as f32 / 1000.0;
+                    app.yaw += (x - center_x) as f32 * 0.006 * sensitivity;
+                    let pitch_direction = if app.settings.invert_mouse_y {
+                        1.0
+                    } else {
+                        -1.0
+                    };
+                    app.pitch = (app.pitch
+                        + (y - center_y) as f32 * 0.006 * sensitivity * pitch_direction)
+                        .clamp(-1.45, 1.45);
                     if app.yaw != previous_yaw || app.pitch != previous_pitch {
                         if let Some(scene) = SCENE.as_mut() {
                             scene.dirty = true;
@@ -780,6 +812,13 @@ unsafe extern "system" fn window_proc(
             if INVENTORY_FORM.is_some() {
                 if wparam as u32 == VK_ESCAPE && message == WM_KEYDOWN {
                     close_inventory_form(window);
+                }
+                return 0;
+            }
+            if OPTIONS_FORM.is_some() {
+                if wparam as u32 == VK_ESCAPE && message == WM_KEYDOWN && is_initial_keydown(lparam)
+                {
+                    close_options_form(window);
                 }
                 return 0;
             }
@@ -900,6 +939,7 @@ unsafe extern "system" fn window_proc(
         }
         WM_DESTROY => {
             destroy_world_creation_form();
+            destroy_options_form();
             destroy_pause_form();
             if let (Some(app), Some(scene)) = (APP.as_mut(), SCENE.as_mut()) {
                 while let Some(breaking) = app.pending_block_actions.pop_front() {
@@ -1279,10 +1319,19 @@ unsafe fn set_inventory_status(message: &str) {
 
 #[allow(static_mut_refs)]
 unsafe fn open_pause_form(window: Hwnd) {
+    let cursor_was_locked = APP.as_ref().is_some_and(|app| app.cursor_locked);
+    open_pause_form_with_capture(window, cursor_was_locked, cursor_was_locked);
+}
+
+#[allow(static_mut_refs)]
+unsafe fn open_pause_form_with_capture(
+    window: Hwnd,
+    cursor_was_locked: bool,
+    make_cursor_visible: bool,
+) {
     if PAUSE_FORM.is_some() || INVENTORY_FORM.is_some() || WORLD_FORM.is_some() {
         return;
     }
-    let cursor_was_locked = APP.as_ref().is_some_and(|app| app.cursor_locked);
     if let Some(app) = APP.as_mut() {
         app.dialog_open = true;
         app.cursor_locked = false;
@@ -1295,7 +1344,7 @@ unsafe fn open_pause_form(window: Hwnd) {
         return;
     }
     ClipCursor(null());
-    if cursor_was_locked {
+    if make_cursor_visible {
         ShowCursor(1);
     }
 
@@ -1307,7 +1356,7 @@ unsafe fn open_pause_form(window: Hwnd) {
     };
     GetClientRect(window, &mut client);
     let width = 360;
-    let height = 226;
+    let height = 264;
     let left = ((client.right - width) / 2).max(12);
     let top = ((client.bottom - height) / 2).max(12);
     let mut controls = Vec::new();
@@ -1325,7 +1374,7 @@ unsafe fn open_pause_form(window: Hwnd) {
     controls.push(create_form_control(
         window,
         "STATIC",
-        "Options and accessibility settings are not implemented yet.",
+        "Video field of view and mouse controls are available in Options.",
         0,
         left + 24,
         top + 50,
@@ -1339,19 +1388,31 @@ unsafe fn open_pause_form(window: Hwnd) {
         "Resume",
         BS_DEFPUSHBUTTON | WS_TABSTOP,
         left + 24,
-        top + 92,
+        top + 86,
         width - 48,
         34,
         PAUSE_RESUME_ID,
     );
     controls.push(resume_button);
+    let options_button = create_form_control(
+        window,
+        "BUTTON",
+        "Options",
+        BS_PUSHBUTTON | WS_TABSTOP,
+        left + 24,
+        top + 126,
+        width - 48,
+        34,
+        PAUSE_OPTIONS_ID,
+    );
+    controls.push(options_button);
     controls.push(create_form_control(
         window,
         "BUTTON",
         "Save & Quit",
         BS_PUSHBUTTON | WS_TABSTOP,
         left + 24,
-        top + 132,
+        top + 166,
         width - 48,
         34,
         PAUSE_SAVE_QUIT_ID,
@@ -1362,7 +1423,7 @@ unsafe fn open_pause_form(window: Hwnd) {
         "",
         0,
         left + 24,
-        top + 174,
+        top + 206,
         width - 48,
         32,
         0,
@@ -1386,6 +1447,7 @@ unsafe fn handle_pause_command(window: Hwnd, command: usize) -> bool {
     }
     match command {
         PAUSE_RESUME_ID | DIALOG_IDCANCEL => close_pause_form(window),
+        PAUSE_OPTIONS_ID => open_options_form(window),
         PAUSE_SAVE_QUIT_ID => save_and_quit_from_pause(window),
         _ => return true,
     }
@@ -1456,6 +1518,270 @@ unsafe fn close_pause_form(window: Hwnd) {
 #[allow(static_mut_refs)]
 unsafe fn destroy_pause_form() {
     if let Some(form) = PAUSE_FORM.take() {
+        for control in form.controls.into_iter().rev() {
+            if !control.is_null() {
+                DestroyWindow(control);
+            }
+        }
+    }
+}
+
+#[allow(static_mut_refs)]
+unsafe fn open_options_form(window: Hwnd) {
+    let return_to_capture = PAUSE_FORM
+        .as_ref()
+        .is_some_and(|form| form.cursor_was_locked);
+    if PAUSE_FORM.is_none() || OPTIONS_FORM.is_some() {
+        return;
+    }
+    destroy_pause_form();
+
+    let mut client = Rect {
+        left: 0,
+        top: 0,
+        right: 0,
+        bottom: 0,
+    };
+    GetClientRect(window, &mut client);
+    let width = 460;
+    let height = 330;
+    let left = ((client.right - width) / 2).max(12);
+    let top = ((client.bottom - height) / 2).max(12);
+    let mut controls = Vec::new();
+    controls.push(create_form_control(
+        window,
+        "STATIC",
+        "Options — Video and Controls",
+        0,
+        left + 24,
+        top + 16,
+        width - 48,
+        28,
+        0,
+    ));
+    controls.push(create_form_control(
+        window,
+        "STATIC",
+        "Field of view (30–110 degrees)",
+        0,
+        left + 24,
+        top + 54,
+        width - 48,
+        22,
+        0,
+    ));
+    let field_of_view_edit = create_form_control(
+        window,
+        "EDIT",
+        &APP.as_ref()
+            .map(|app| app.settings.field_of_view_degrees.to_string())
+            .unwrap_or_else(|| Settings::default().field_of_view_degrees.to_string()),
+        ES_AUTOHSCROLL | WS_TABSTOP,
+        left + 24,
+        top + 78,
+        width - 48,
+        28,
+        OPTIONS_FOV_ID,
+    );
+    SendMessageW(field_of_view_edit, EM_SETLIMITTEXT, 5, 0);
+    controls.push(field_of_view_edit);
+    controls.push(create_form_control(
+        window,
+        "STATIC",
+        "Mouse sensitivity (100–2000; 1000 is current default)",
+        0,
+        left + 24,
+        top + 116,
+        width - 48,
+        22,
+        0,
+    ));
+    let sensitivity_edit = create_form_control(
+        window,
+        "EDIT",
+        &APP.as_ref()
+            .map(|app| app.settings.mouse_sensitivity_permille.to_string())
+            .unwrap_or_else(|| Settings::default().mouse_sensitivity_permille.to_string()),
+        ES_AUTOHSCROLL | WS_TABSTOP,
+        left + 24,
+        top + 140,
+        width - 48,
+        28,
+        OPTIONS_SENSITIVITY_ID,
+    );
+    SendMessageW(sensitivity_edit, EM_SETLIMITTEXT, 5, 0);
+    controls.push(sensitivity_edit);
+    let invert_mouse_y_check = create_form_control(
+        window,
+        "BUTTON",
+        "Invert mouse Y",
+        BS_AUTOCHECKBOX | WS_TABSTOP,
+        left + 24,
+        top + 178,
+        width - 48,
+        28,
+        OPTIONS_INVERT_ID,
+    );
+    if APP.as_ref().is_some_and(|app| app.settings.invert_mouse_y) {
+        SendMessageW(invert_mouse_y_check, BM_SETCHECK, BST_CHECKED as usize, 0);
+    }
+    controls.push(invert_mouse_y_check);
+    let status_label = create_form_control(
+        window,
+        "STATIC",
+        "These project settings are not yet verified against Java Edition 26.3.",
+        0,
+        left + 24,
+        top + 210,
+        width - 48,
+        34,
+        0,
+    );
+    controls.push(status_label);
+    controls.push(create_form_control(
+        window,
+        "BUTTON",
+        "Use Defaults",
+        BS_PUSHBUTTON | WS_TABSTOP,
+        left + 24,
+        top + 258,
+        120,
+        34,
+        OPTIONS_DEFAULTS_ID,
+    ));
+    controls.push(create_form_control(
+        window,
+        "BUTTON",
+        "Apply",
+        BS_DEFPUSHBUTTON | WS_TABSTOP,
+        left + 160,
+        top + 258,
+        120,
+        34,
+        OPTIONS_APPLY_ID,
+    ));
+    controls.push(create_form_control(
+        window,
+        "BUTTON",
+        "Back",
+        BS_PUSHBUTTON | WS_TABSTOP,
+        left + 296,
+        top + 258,
+        120,
+        34,
+        OPTIONS_BACK_ID,
+    ));
+    OPTIONS_FORM = Some(OptionsForm {
+        controls,
+        field_of_view_edit,
+        sensitivity_edit,
+        invert_mouse_y_check,
+        status_label,
+        return_to_capture,
+    });
+    if !field_of_view_edit.is_null() {
+        SetFocus(field_of_view_edit);
+    }
+}
+
+#[allow(static_mut_refs)]
+unsafe fn handle_options_command(window: Hwnd, command: usize) -> bool {
+    if OPTIONS_FORM.is_none() {
+        return false;
+    }
+    match command {
+        OPTIONS_BACK_ID | DIALOG_IDCANCEL => close_options_form(window),
+        OPTIONS_DEFAULTS_ID => {
+            if let Some(form) = OPTIONS_FORM.as_ref() {
+                let defaults = Settings::default();
+                let fov = wide(&defaults.field_of_view_degrees.to_string());
+                let sensitivity = wide(&defaults.mouse_sensitivity_permille.to_string());
+                SetWindowTextW(form.field_of_view_edit, fov.as_ptr());
+                SetWindowTextW(form.sensitivity_edit, sensitivity.as_ptr());
+                SendMessageW(form.invert_mouse_y_check, BM_SETCHECK, 0, 0);
+                set_options_status("Defaults staged. Select Apply to save them.");
+            }
+        }
+        OPTIONS_APPLY_ID => apply_options_form(window),
+        _ => return true,
+    }
+    true
+}
+
+#[allow(static_mut_refs)]
+unsafe fn apply_options_form(window: Hwnd) {
+    let Some(form) = OPTIONS_FORM.as_ref() else {
+        return;
+    };
+    let field_of_view_degrees = form_control_text(form.field_of_view_edit)
+        .trim()
+        .parse::<u16>();
+    let mouse_sensitivity_permille = form_control_text(form.sensitivity_edit)
+        .trim()
+        .parse::<u16>();
+    let (Ok(field_of_view_degrees), Ok(mouse_sensitivity_permille)) =
+        (field_of_view_degrees, mouse_sensitivity_permille)
+    else {
+        set_options_status("Enter whole numbers for both settings.");
+        return;
+    };
+    let settings = Settings {
+        field_of_view_degrees,
+        mouse_sensitivity_permille,
+        invert_mouse_y: SendMessageW(form.invert_mouse_y_check, BM_GETCHECK, 0, 0) == BST_CHECKED,
+    };
+    if let Err(error) = settings.validate() {
+        let message = match error {
+            crate::settings::SettingsValidationError::FieldOfViewOutOfRange => {
+                "Field of view must be between 30 and 110 degrees."
+            }
+            crate::settings::SettingsValidationError::MouseSensitivityOutOfRange => {
+                "Mouse sensitivity must be between 100 and 2000."
+            }
+        };
+        set_options_status(message);
+        return;
+    }
+    let Some(store) = APP.as_ref().and_then(|app| app.settings_store.clone()) else {
+        set_options_status("Settings location is unavailable; changes were not applied.");
+        return;
+    };
+    if let Err(error) = store.save(settings) {
+        set_options_status(&format!("Could not save settings: {error}"));
+        if let Some(app) = APP.as_ref() {
+            app.logger
+                .event("ERROR", "settings_save_failed", error.to_string());
+        }
+        return;
+    }
+    if let Some(app) = APP.as_mut() {
+        app.settings = settings;
+        app.camera.fov_degrees = settings.field_of_view_degrees as f32;
+        app.logger.event("INFO", "settings_saved", "scope=local");
+    }
+    close_options_form(window);
+}
+
+#[allow(static_mut_refs)]
+unsafe fn set_options_status(message: &str) {
+    if let Some(form) = OPTIONS_FORM.as_ref() {
+        let text = wide(message);
+        SetWindowTextW(form.status_label, text.as_ptr());
+    }
+}
+
+#[allow(static_mut_refs)]
+unsafe fn close_options_form(window: Hwnd) {
+    let return_to_capture = OPTIONS_FORM
+        .as_ref()
+        .is_some_and(|form| form.return_to_capture);
+    destroy_options_form();
+    open_pause_form_with_capture(window, return_to_capture, false);
+}
+
+#[allow(static_mut_refs)]
+unsafe fn destroy_options_form() {
+    if let Some(form) = OPTIONS_FORM.take() {
         for control in form.controls.into_iter().rev() {
             if !control.is_null() {
                 DestroyWindow(control);
@@ -2668,6 +2994,27 @@ unsafe fn activate_world(window: Hwnd, app: &mut AppState, saved: crate::world_s
 #[allow(static_mut_refs)]
 pub fn run(logger: Option<Logger>) {
     let logger = logger.unwrap_or_else(|| Logger::start("voxel-engine.log").expect("logger"));
+    let (settings_store, settings) = match SettingsStore::default_path() {
+        Ok(path) => {
+            let store = SettingsStore::new(path);
+            match store.load() {
+                Ok(loaded) => {
+                    for warning in loaded.warnings {
+                        logger.event("WARN", "settings_value_fallback", warning.to_string());
+                    }
+                    (Some(store), loaded.settings)
+                }
+                Err(error) => {
+                    logger.event("WARN", "settings_load_fallback", error.to_string());
+                    (Some(store), Settings::default())
+                }
+            }
+        }
+        Err(error) => {
+            logger.event("WARN", "settings_path_unavailable", error.to_string());
+            (None, Settings::default())
+        }
+    };
     let loaded = WorldStore::default_root().and_then(|root| {
         let store = WorldStore::new(root);
         let generated = TerrainGenerator::default().generate_region(2);
@@ -2697,11 +3044,13 @@ pub fn run(logger: Option<Logger>) {
     let player = player_controller(&initial_player, mode);
     let mut scene = build_scene(world);
     scene.drop_meshes = build_drop_meshes(&initial_player.drops);
+    let mut camera = Camera::default();
+    camera.fov_degrees = settings.field_of_view_degrees as f32;
     let width = unsafe { GetSystemMetrics(SM_CXSCREEN) };
     let height = unsafe { GetSystemMetrics(SM_CYSCREEN) };
     unsafe {
         APP = Some(AppState {
-            camera: Camera::default(),
+            camera,
             input: InputState::default(),
             yaw: initial_player.yaw,
             pitch: initial_player.pitch,
@@ -2711,6 +3060,8 @@ pub fn run(logger: Option<Logger>) {
             render_width: (width as u32).min(MAX_RENDER_WIDTH),
             render_height: (height as u32).min(MAX_RENDER_HEIGHT),
             logger,
+            settings,
+            settings_store,
             last_physics: Instant::now(),
             gpu: None,
             selected_block: initial_player.selected_block,
@@ -2743,7 +3094,7 @@ pub fn run(logger: Option<Logger>) {
         }
         SCENE = Some(scene);
         FRAME = Some(build_frame(
-            Camera::default(),
+            camera,
             (width as u32).min(MAX_RENDER_WIDTH),
             (height as u32).min(MAX_RENDER_HEIGHT),
             SCENE.as_ref().unwrap(),
@@ -2810,7 +3161,10 @@ pub fn run(logger: Option<Logger>) {
             private: 0,
         };
         while GetMessageW(&mut message, null_mut(), 0, 0) > 0 {
-            if (WORLD_FORM.is_some() || INVENTORY_FORM.is_some() || PAUSE_FORM.is_some())
+            if (WORLD_FORM.is_some()
+                || INVENTORY_FORM.is_some()
+                || PAUSE_FORM.is_some()
+                || OPTIONS_FORM.is_some())
                 && IsDialogMessageW(window, &message) != 0
             {
                 continue;
