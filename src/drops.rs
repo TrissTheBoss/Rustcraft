@@ -281,7 +281,7 @@ fn valid_position(position: [f64; 3]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::inventory::{ItemDefinition, ItemId};
+    use crate::inventory::{ClickButton, InventoryMenu, InventorySlot, ItemDefinition, ItemId};
     use crate::world::ChunkPos;
 
     fn catalog() -> ItemCatalog {
@@ -524,5 +524,53 @@ mod tests {
             Err(DropError::InvalidPosition)
         );
         assert_eq!(drops.len(), 0);
+    }
+
+    #[test]
+    fn dropping_cursor_is_atomic_when_spawn_succeeds_or_capacity_fails() {
+        let catalog = catalog();
+        let key = ItemKey::new(ItemId(2));
+        let mut inventory = Inventory::default();
+        inventory.insert(key, 4, &catalog).unwrap();
+        let mut menu = InventoryMenu::default();
+        menu.click(
+            &mut inventory,
+            InventorySlot::Main(0),
+            ClickButton::Primary,
+            &catalog,
+        )
+        .unwrap();
+
+        let mut drops = ItemDrops::default();
+        assert!(menu
+            .drop_cursor(&mut drops, [1.5, 2.0, 1.5], 0, &catalog)
+            .unwrap()
+            .is_some());
+        assert_eq!(menu.cursor(), None);
+        assert_eq!(drops.len(), 1);
+        assert_eq!(drops.iter().next().unwrap().stack.count, 4);
+        assert_eq!(inventory.count(key), 0);
+
+        inventory.insert(key, 4, &catalog).unwrap();
+        menu.click(
+            &mut inventory,
+            InventorySlot::Main(0),
+            ClickButton::Primary,
+            &catalog,
+        )
+        .unwrap();
+        let one = ItemStack { key, count: 1 };
+        for _ in 1..MAX_DROPPED_ITEMS {
+            drops
+                .spawn(one, [5.0, 5.0, 5.0], u16::MAX, &catalog)
+                .unwrap();
+        }
+        assert_eq!(
+            menu.drop_cursor(&mut drops, [1.5, 2.0, 1.5], 0, &catalog),
+            Err(DropError::Capacity)
+        );
+        assert_eq!(menu.cursor().unwrap().count, 4);
+        assert_eq!(inventory.count(key), 0);
+        assert_eq!(drops.len(), MAX_DROPPED_ITEMS);
     }
 }

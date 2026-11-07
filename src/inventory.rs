@@ -7,6 +7,8 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
+use crate::drops::{DropError, DropId, ItemDrops};
+
 pub const HOTBAR_SLOT_COUNT: usize = 9;
 pub const MAIN_SLOT_COUNT: usize = 36;
 pub(crate) const SAVED_SLOT_COUNT: usize = MAIN_SLOT_COUNT + 5;
@@ -540,6 +542,24 @@ impl InventoryMenu {
         debug_assert_eq!(remaining, 0);
         self.cursor = None;
         Ok(())
+    }
+
+    /// Spawn the carried stack into the world and clear the cursor only after
+    /// the drop entity has been validated and created successfully.
+    pub fn drop_cursor(
+        &mut self,
+        drops: &mut ItemDrops,
+        position: [f64; 3],
+        pickup_delay_ticks: u16,
+        catalog: &ItemCatalog,
+    ) -> Result<Option<DropId>, DropError> {
+        let Some(stack) = self.cursor else {
+            return Ok(None);
+        };
+        drops.validate_spawn(stack, position, catalog)?;
+        let id = drops.spawn(stack, position, pickup_delay_ticks, catalog)?;
+        self.cursor = None;
+        Ok(Some(id))
     }
 }
 

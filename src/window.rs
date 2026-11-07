@@ -17,7 +17,10 @@ use crate::interaction::{
     break_block, break_block_with_drop, place_full_block, raycast_blocks, BlockRayHit,
     PROTOTYPE_INTERACTION_REACH,
 };
-use crate::inventory::{Inventory, ItemCatalog, ItemDefinition, ItemId};
+use crate::inventory::{
+    ArmorSlot, ClickButton, Inventory, InventoryMenu, InventorySlot, ItemCatalog, ItemDefinition,
+    ItemId,
+};
 use crate::logger::Logger;
 use crate::mining::{MiningCatalog, MiningEvent, MiningSession, MiningTool};
 use crate::movement::{GameMode, MovementInput, PlayerController};
@@ -74,6 +77,11 @@ const FORM_WORLD_DIFFICULTY: usize = 1107;
 const FORM_WORLD_DIFFICULTY_LOCKED: usize = 1108;
 const DIALOG_IDOK: usize = 1;
 const DIALOG_IDCANCEL: usize = 2;
+const INVENTORY_SLOT_ID_BASE: usize = 8000;
+const INVENTORY_SLOT_COUNT: usize = 41;
+const INVENTORY_MODE_ID: usize = INVENTORY_SLOT_ID_BASE + INVENTORY_SLOT_COUNT;
+const INVENTORY_DROP_ID: usize = INVENTORY_MODE_ID + 1;
+const INVENTORY_CLOSE_ID: usize = INVENTORY_DROP_ID + 1;
 const CB_ADDSTRING: u32 = 0x0143;
 const CB_SETCURSEL: u32 = 0x014E;
 const CB_GETCURSEL: u32 = 0x0147;
@@ -96,6 +104,7 @@ const MB_ICONWARNING: u32 = 0x0030;
 const MB_DEFBUTTON2: u32 = 0x0100;
 const TICK_INTERVAL_MS: u32 = 50;
 const VK_ESCAPE: u32 = 0x1B;
+const VK_E: u32 = 0x45;
 const WM_LBUTTONDOWN: u32 = 0x0201;
 const WM_LBUTTONUP: u32 = 0x0202;
 const WM_RBUTTONDOWN: u32 = 0x0204;
@@ -249,6 +258,7 @@ static mut FRAME: Option<(Vec<u8>, BitmapInfo)> = None;
 static mut APP: Option<AppState> = None;
 static mut SCENE: Option<Scene> = None;
 static mut WORLD_FORM: Option<WorldCreationForm> = None;
+static mut INVENTORY_FORM: Option<InventoryForm> = None;
 
 struct Scene {
     world: crate::world::World,
@@ -277,6 +287,7 @@ struct AppState {
     last_physics: Instant,
     selected_block: crate::world::BlockId,
     inventory: Inventory,
+    inventory_menu: InventoryMenu,
     item_catalog: ItemCatalog,
     loot_table: BlockLootTable,
     drops: ItemDrops,
@@ -306,6 +317,16 @@ struct WorldCreationForm {
     error_label: Hwnd,
 }
 
+struct InventoryForm {
+    controls: Vec<Hwnd>,
+    slot_controls: Vec<Hwnd>,
+    cursor_label: Hwnd,
+    status_label: Hwnd,
+    mode_button: Hwnd,
+    secondary_click: bool,
+    cursor_was_locked: bool,
+}
+
 const MF_STRING: u32 = 0x0000;
 const MF_SEPARATOR: u32 = 0x0800;
 const MF_POPUP: u32 = 0x0010;
@@ -325,6 +346,9 @@ unsafe extern "system" fn window_proc(
     match message {
         WM_COMMAND => {
             let command = wparam & 0xffff;
+            if handle_inventory_command(window, command) {
+                return 0;
+            }
             if WORLD_FORM.is_some() && command == DIALOG_IDCANCEL {
                 close_world_creation_form(window);
                 return 0;
@@ -429,6 +453,10 @@ unsafe extern "system" fn window_proc(
             0
         }
         WM_CLOSE => {
+            if INVENTORY_FORM.is_some() {
+                close_inventory_form(window);
+                return 0;
+            }
             DestroyWindow(window);
             0
         }
@@ -736,6 +764,18 @@ unsafe extern "system" fn window_proc(
             0
         }
         WM_KEYDOWN | WM_KEYUP => {
+            if INVENTORY_FORM.is_some() {
+                if wparam as u32 == VK_ESCAPE && message == WM_KEYDOWN {
+                    close_inventory_form(window);
+                }
+                return 0;
+            }
+            if wparam as u32 == VK_E && message == WM_KEYDOWN {
+                if APP.as_ref().is_some_and(|app| !app.dialog_open) {
+                    open_inventory_form(window);
+                    return 0;
+                }
+            }
             if let Some(app) = APP.as_mut() {
                 if wparam as u32 == VK_ESCAPE && message == WM_KEYDOWN {
                     app.cursor_locked = false;
@@ -1078,6 +1118,366 @@ unsafe fn create_form_control(
     )
 }
 
+fn inventory_slot(index: usize) -> Option<InventorySlot> {
+    match index {
+        0..=35 => Some(InventorySlot::Main(index)),
+        36 => Some(InventorySlot::Armor(ArmorSlot::Head)),
+        37 => Some(InventorySlot::Armor(ArmorSlot::Chest)),
+        38 => Some(InventorySlot::Armor(ArmorSlot::Legs)),
+        39 => Some(InventorySlot::Armor(ArmorSlot::Feet)),
+        40 => Some(InventorySlot::Offhand),
+        _ => None,
+    }
+}
+
+fn inventory_item_name(item: ItemId) -> String {
+    match item.0 {
+        1 => "Soil".to_owned(),
+        2 => "Surface".to_owned(),
+        3 => "Rock".to_owned(),
+        id => format!("Item {id}"),
+    }
+}
+
+fn inventory_slot_label(app: &AppState, index: usize) -> String {
+    let Some(slot) = inventory_slot(index) else {
+        return "Invalid slot".to_owned();
+    };
+    let prefix = match index {
+        0..=8 => format!(
+            "{}{}",
+            if app.inventory.selected_hotbar() as usize == index {
+                ">"
+            } else {
+                ""
+            },
+            index + 1
+        ),
+        9..=35 => format!("{}", index - 8),
+        36 => "Head".to_owned(),
+        37 => "Chest".to_owned(),
+        38 => "Legs".to_owned(),
+        39 => "Feet".to_owned(),
+        _ => "Offhand".to_owned(),
+    };
+    match app.inventory.stack(slot).ok().flatten() {
+        Some(stack) => format!(
+            "{prefix}: {} x{}",
+            inventory_item_name(stack.key.id),
+            stack.count
+        ),
+        None => format!("{prefix}: empty"),
+    }
+}
+
+#[allow(static_mut_refs)]
+unsafe fn refresh_inventory_form() {
+    let Some((slots, cursor_label, status_label, cursor_text)) = (|| {
+        let app = APP.as_ref()?;
+        let form = INVENTORY_FORM.as_ref()?;
+        let cursor_text = match app.inventory_menu.cursor() {
+            Some(stack) => format!(
+                "Cursor: {} x{}",
+                inventory_item_name(stack.key.id),
+                stack.count
+            ),
+            None => "Cursor: empty".to_owned(),
+        };
+        Some((
+            form.slot_controls.clone(),
+            form.cursor_label,
+            form.status_label,
+            cursor_text,
+        ))
+    })() else {
+        return;
+    };
+    if let Some(app) = APP.as_ref() {
+        for (index, control) in slots.into_iter().enumerate() {
+            let text = wide(&inventory_slot_label(app, index));
+            SetWindowTextW(control, text.as_ptr());
+        }
+        let text = wide(&cursor_text);
+        SetWindowTextW(cursor_label, text.as_ptr());
+    }
+    let _ = status_label;
+}
+
+#[allow(static_mut_refs)]
+unsafe fn drop_inventory_cursor() {
+    let result = {
+        let Some(app) = APP.as_mut() else {
+            return;
+        };
+        let player = app.player.transform;
+        let position = [
+            player.x + app.yaw.cos() as f64 * 0.8,
+            player.y + PLAYER_EYE_OFFSET - 0.2,
+            player.z + app.yaw.sin() as f64 * 0.8,
+        ];
+        app.inventory_menu.drop_cursor(
+            &mut app.drops,
+            position,
+            ITEM_PICKUP_DELAY_TICKS,
+            &app.item_catalog,
+        )
+    };
+    match result {
+        Ok(Some(id)) => {
+            if let Some(scene) = SCENE.as_mut() {
+                scene.dirty = true;
+                if let Some(app) = APP.as_ref() {
+                    scene.drop_meshes = build_drop_meshes(&app.drops);
+                }
+                if let Some(app) = APP.as_mut() {
+                    if let Some(gpu) = app.gpu.as_mut() {
+                        upload_scene_meshes(gpu, scene);
+                    }
+                    app.logger
+                        .event("INFO", "inventory_item_dropped", format!("id={}", id.0));
+                }
+            }
+            if let Some(form) = INVENTORY_FORM.as_ref() {
+                let empty = wide("");
+                SetWindowTextW(form.status_label, empty.as_ptr());
+            }
+        }
+        Ok(None) => set_inventory_status("Cursor stack is empty."),
+        Err(error) => set_inventory_status(&format!("Could not drop cursor stack: {error}")),
+    }
+    refresh_inventory_form();
+}
+
+#[allow(static_mut_refs)]
+unsafe fn set_inventory_status(message: &str) {
+    if let Some(form) = INVENTORY_FORM.as_ref() {
+        let text = wide(message);
+        SetWindowTextW(form.status_label, text.as_ptr());
+    }
+}
+
+#[allow(static_mut_refs)]
+unsafe fn open_inventory_form(window: Hwnd) {
+    if INVENTORY_FORM.is_some() || WORLD_FORM.is_some() {
+        return;
+    }
+    let mut client = Rect {
+        left: 0,
+        top: 0,
+        right: 0,
+        bottom: 0,
+    };
+    GetClientRect(window, &mut client);
+    let width = 760;
+    let height = 350;
+    let left = ((client.right - width) / 2).max(12);
+    let top = ((client.bottom - height) / 2).max(12);
+    let mut controls = Vec::new();
+    let panel = create_form_control(
+        window,
+        "STATIC",
+        "",
+        SS_WHITERECT,
+        left,
+        top,
+        width,
+        height,
+        0,
+    );
+    controls.push(panel);
+    let title = create_form_control(
+        window,
+        "STATIC",
+        "Inventory - left click selects; choose Secondary Click to split/place one",
+        0,
+        left + 20,
+        top + 14,
+        700,
+        24,
+        0,
+    );
+    controls.push(title);
+    let main_label = create_form_control(
+        window,
+        "STATIC",
+        "Inventory",
+        0,
+        left + 20,
+        top + 42,
+        520,
+        22,
+        0,
+    );
+    controls.push(main_label);
+    let mut slot_controls = vec![null_mut(); INVENTORY_SLOT_COUNT];
+    for index in 9..36 {
+        let offset = index - 9;
+        let row = offset / 9;
+        let column = offset % 9;
+        let control = create_form_control(
+            window,
+            "BUTTON",
+            "",
+            BS_PUSHBUTTON | WS_TABSTOP,
+            left + 20 + column as i32 * 60,
+            top + 66 + row as i32 * 48,
+            56,
+            42,
+            INVENTORY_SLOT_ID_BASE + index,
+        );
+        slot_controls[index] = control;
+        controls.push(control);
+    }
+    let hotbar_label = create_form_control(
+        window,
+        "STATIC",
+        "Hotbar",
+        0,
+        left + 20,
+        top + 218,
+        520,
+        20,
+        0,
+    );
+    controls.push(hotbar_label);
+    for index in 0..9 {
+        let control = create_form_control(
+            window,
+            "BUTTON",
+            "",
+            BS_PUSHBUTTON | WS_TABSTOP,
+            left + 20 + index as i32 * 60,
+            top + 238,
+            56,
+            42,
+            INVENTORY_SLOT_ID_BASE + index,
+        );
+        slot_controls[index] = control;
+        controls.push(control);
+    }
+    let equipment_label = create_form_control(
+        window,
+        "STATIC",
+        "Equipment",
+        0,
+        left + 570,
+        top + 42,
+        155,
+        20,
+        0,
+    );
+    controls.push(equipment_label);
+    for index in 36..INVENTORY_SLOT_COUNT {
+        let control = create_form_control(
+            window,
+            "BUTTON",
+            "",
+            BS_PUSHBUTTON | WS_TABSTOP,
+            left + 570,
+            top + 66 + (index - 36) as i32 * 44,
+            155,
+            38,
+            INVENTORY_SLOT_ID_BASE + index,
+        );
+        slot_controls[index] = control;
+        controls.push(control);
+    }
+    let cursor_label = create_form_control(
+        window,
+        "STATIC",
+        "Cursor: empty",
+        0,
+        left + 20,
+        top + 298,
+        280,
+        22,
+        0,
+    );
+    controls.push(cursor_label);
+    let mode_button = create_form_control(
+        window,
+        "BUTTON",
+        "Click Mode: Primary",
+        BS_PUSHBUTTON | WS_TABSTOP,
+        left + 310,
+        top + 294,
+        140,
+        30,
+        INVENTORY_MODE_ID,
+    );
+    controls.push(mode_button);
+    let drop_button = create_form_control(
+        window,
+        "BUTTON",
+        "Drop Cursor",
+        BS_PUSHBUTTON | WS_TABSTOP,
+        left + 460,
+        top + 294,
+        150,
+        30,
+        INVENTORY_DROP_ID,
+    );
+    controls.push(drop_button);
+    let status_label =
+        create_form_control(window, "STATIC", "", 0, left + 20, top + 326, 520, 20, 0);
+    controls.push(status_label);
+    let close = create_form_control(
+        window,
+        "BUTTON",
+        "Close (E)",
+        BS_DEFPUSHBUTTON | WS_TABSTOP,
+        left + 625,
+        top + 294,
+        100,
+        30,
+        INVENTORY_CLOSE_ID,
+    );
+    controls.push(close);
+    if controls.iter().any(|control| control.is_null()) {
+        for control in controls
+            .into_iter()
+            .rev()
+            .filter(|control| !control.is_null())
+        {
+            DestroyWindow(control);
+        }
+        if let Some(app) = APP.as_ref() {
+            app.logger.event(
+                "ERROR",
+                "inventory_form_failed",
+                "a native screen control failed",
+            );
+        }
+        return;
+    }
+    let cursor_was_locked = APP.as_ref().is_some_and(|app| app.cursor_locked);
+    INVENTORY_FORM = Some(InventoryForm {
+        controls,
+        slot_controls,
+        cursor_label,
+        status_label,
+        mode_button,
+        secondary_click: false,
+        cursor_was_locked,
+    });
+    if let Some(app) = APP.as_mut() {
+        app.dialog_open = true;
+        app.input.clear();
+        app.breaking_held = false;
+        app.mining_session.reset();
+        app.last_physics = Instant::now();
+        if app.cursor_locked {
+            app.cursor_locked = false;
+            ClipCursor(null());
+            ShowCursor(1);
+        }
+    }
+    refresh_inventory_form();
+    if let Some(form) = INVENTORY_FORM.as_ref() {
+        SetFocus(form.slot_controls[0]);
+    }
+}
+
 unsafe fn add_form_label(
     parent: Hwnd,
     controls: &mut Vec<Hwnd>,
@@ -1416,7 +1816,10 @@ fn optional_seed(text: &str) -> Result<u64, ()> {
 
 #[cfg(test)]
 mod world_creation_tests {
-    use super::{optional_seed, player_controller, stored_game_mode, GameMode, StoredGameMode};
+    use super::{
+        inventory_slot, optional_seed, player_controller, stored_game_mode, GameMode,
+        InventorySlot, StoredGameMode,
+    };
     use crate::world_store::PlayerSnapshot;
 
     #[test]
@@ -1441,6 +1844,31 @@ mod world_creation_tests {
         assert_eq!(player.mode, GameMode::Adventure);
         assert_eq!(stored_game_mode(player.mode), StoredGameMode::Adventure);
     }
+
+    #[test]
+    fn inventory_screen_maps_main_hotbar_equipment_and_offhand_slots() {
+        for index in 0..36 {
+            assert_eq!(inventory_slot(index), Some(InventorySlot::Main(index)));
+        }
+        assert_eq!(
+            inventory_slot(36),
+            Some(InventorySlot::Armor(crate::inventory::ArmorSlot::Head))
+        );
+        assert_eq!(
+            inventory_slot(37),
+            Some(InventorySlot::Armor(crate::inventory::ArmorSlot::Chest))
+        );
+        assert_eq!(
+            inventory_slot(38),
+            Some(InventorySlot::Armor(crate::inventory::ArmorSlot::Legs))
+        );
+        assert_eq!(
+            inventory_slot(39),
+            Some(InventorySlot::Armor(crate::inventory::ArmorSlot::Feet))
+        );
+        assert_eq!(inventory_slot(40), Some(InventorySlot::Offhand));
+        assert_eq!(inventory_slot(41), None);
+    }
 }
 
 #[allow(static_mut_refs)]
@@ -1453,6 +1881,128 @@ unsafe fn close_world_creation_form(window: Hwnd) {
     }
     SetFocus(window);
     InvalidateRect(window, null(), 0);
+}
+
+#[allow(static_mut_refs)]
+unsafe fn handle_inventory_command(window: Hwnd, command: usize) -> bool {
+    if INVENTORY_FORM.is_none() {
+        return false;
+    }
+    if command == INVENTORY_CLOSE_ID || command == DIALOG_IDCANCEL {
+        close_inventory_form(window);
+        return true;
+    }
+    if command == INVENTORY_MODE_ID {
+        if let Some(form) = INVENTORY_FORM.as_mut() {
+            form.secondary_click = !form.secondary_click;
+            let label = if form.secondary_click {
+                "Click Mode: Secondary"
+            } else {
+                "Click Mode: Primary"
+            };
+            let text = wide(label);
+            SetWindowTextW(form.mode_button, text.as_ptr());
+        }
+        return true;
+    }
+    if command == INVENTORY_DROP_ID {
+        drop_inventory_cursor();
+        return true;
+    }
+    if (INVENTORY_SLOT_ID_BASE..INVENTORY_SLOT_ID_BASE + INVENTORY_SLOT_COUNT).contains(&command) {
+        let index = command - INVENTORY_SLOT_ID_BASE;
+        let secondary = INVENTORY_FORM
+            .as_ref()
+            .is_some_and(|form| form.secondary_click);
+        if let (Some(app), Some(slot)) = (APP.as_mut(), inventory_slot(index)) {
+            let before_inventory = app.inventory;
+            let before_menu = app.inventory_menu.clone();
+            let result = app.inventory_menu.click(
+                &mut app.inventory,
+                slot,
+                if secondary {
+                    ClickButton::Secondary
+                } else {
+                    ClickButton::Primary
+                },
+                &app.item_catalog,
+            );
+            if result.is_ok() {
+                if before_inventory != app.inventory || before_menu != app.inventory_menu {
+                    if let Some(scene) = SCENE.as_mut() {
+                        scene.dirty = true;
+                    }
+                }
+                if let Some(form) = INVENTORY_FORM.as_ref() {
+                    let empty = wide("");
+                    SetWindowTextW(form.status_label, empty.as_ptr());
+                }
+            } else if let Err(error) = result {
+                if let Some(form) = INVENTORY_FORM.as_ref() {
+                    let text = wide(&error.to_string());
+                    SetWindowTextW(form.status_label, text.as_ptr());
+                }
+            }
+        }
+        refresh_inventory_form();
+        return true;
+    }
+    true
+}
+
+#[allow(static_mut_refs)]
+unsafe fn close_inventory_form(window: Hwnd) {
+    let restore_cursor = INVENTORY_FORM
+        .as_ref()
+        .is_some_and(|form| form.cursor_was_locked);
+    let had_cursor = APP
+        .as_ref()
+        .is_some_and(|app| app.inventory_menu.cursor().is_some());
+    if let Some(app) = APP.as_mut() {
+        if let Err(error) = app
+            .inventory_menu
+            .return_cursor(&mut app.inventory, &app.item_catalog)
+        {
+            if let Some(form) = INVENTORY_FORM.as_ref() {
+                let text = wide(&format!(
+                    "Cannot close while cursor stack cannot fit: {error}"
+                ));
+                SetWindowTextW(form.status_label, text.as_ptr());
+            }
+            app.logger
+                .event("WARN", "inventory_close_rejected", error.to_string());
+            return;
+        }
+    }
+    destroy_inventory_form();
+    if let Some(app) = APP.as_mut() {
+        if had_cursor {
+            if let Some(scene) = SCENE.as_mut() {
+                scene.dirty = true;
+            }
+        }
+        app.dialog_open = false;
+        app.input.clear();
+        app.last_physics = Instant::now();
+        if restore_cursor {
+            app.cursor_locked = true;
+            ShowCursor(0);
+            lock_cursor(window);
+        }
+    }
+    SetFocus(window);
+    InvalidateRect(window, null(), 0);
+}
+
+#[allow(static_mut_refs)]
+unsafe fn destroy_inventory_form() {
+    if let Some(form) = INVENTORY_FORM.take() {
+        for control in form.controls.into_iter().rev() {
+            if !control.is_null() {
+                DestroyWindow(control);
+            }
+        }
+    }
 }
 
 #[allow(static_mut_refs)]
@@ -1951,6 +2501,7 @@ pub fn run(logger: Option<Logger>) {
             gpu: None,
             selected_block: initial_player.selected_block,
             inventory: initial_player.inventory,
+            inventory_menu: InventoryMenu::default(),
             item_catalog: prototype_item_catalog(),
             loot_table: BlockLootTable::prototype(),
             drops: initial_player.drops.clone(),
@@ -2045,7 +2596,9 @@ pub fn run(logger: Option<Logger>) {
             private: 0,
         };
         while GetMessageW(&mut message, null_mut(), 0, 0) > 0 {
-            if WORLD_FORM.is_some() && IsDialogMessageW(window, &message) != 0 {
+            if (WORLD_FORM.is_some() || INVENTORY_FORM.is_some())
+                && IsDialogMessageW(window, &message) != 0
+            {
                 continue;
             }
             TranslateMessage(&message);
