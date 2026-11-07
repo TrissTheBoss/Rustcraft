@@ -18,6 +18,7 @@ pub fn ensure_cached(output: &Path) -> Result<bool> {
     let required = [
         output.join("textures/blocks/dirt.png"),
         output.join("textures/blocks/grass_block_side.png"),
+        output.join("textures/blocks/grass_block_top.png"),
         output.join("textures/blocks/stone.png"),
     ];
     if marker.is_file() && required.iter().all(|path| path.is_file()) {

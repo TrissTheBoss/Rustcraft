@@ -68,6 +68,11 @@ impl Aabb {
             ],
         }
     }
+
+    /// Strict overlap; touching faces do not count as intersection.
+    pub fn intersects(self, other: Self) -> bool {
+        (0..3).all(|axis| self.min[axis] < other.max[axis] && self.max[axis] > other.min[axis])
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]

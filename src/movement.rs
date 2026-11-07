@@ -40,6 +40,7 @@ pub struct MovementInput {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PlayerController {
     pub transform: Transform,
+    pub previous_transform: Transform,
     pub velocity: [f64; 3],
     pub half_extents: [f64; 3],
     pub mode: GameMode,
@@ -51,6 +52,7 @@ impl PlayerController {
     pub fn new(transform: Transform) -> Self {
         Self {
             transform,
+            previous_transform: transform,
             velocity: [0.0; 3],
             half_extents: [PLAYER_HALF_WIDTH, PLAYER_HALF_HEIGHT, PLAYER_HALF_WIDTH],
             mode: GameMode::Survival,
@@ -65,6 +67,7 @@ impl PlayerController {
         yaw_radians: f64,
         is_solid: impl Fn(i32, i32, i32) -> bool,
     ) {
+        self.previous_transform = self.transform;
         if input.toggle_flight && self.mode == GameMode::Creative {
             self.flying = !self.flying;
             self.velocity[1] = 0.0;
@@ -110,8 +113,13 @@ impl PlayerController {
                 self.grounded = false;
             }
             self.velocity[1] -= GRAVITY;
+            let has_horizontal_input = input.forward != 0.0 || input.strafe != 0.0;
             let friction = if self.grounded {
-                GROUND_FRICTION
+                if has_horizontal_input {
+                    1.0
+                } else {
+                    GROUND_FRICTION
+                }
             } else {
                 AIR_FRICTION
             };
@@ -313,6 +321,27 @@ mod tests {
             );
         }
         assert!(player.transform.x > 2.0);
+    }
+
+    #[test]
+    fn walking_input_reaches_configured_ground_speed() {
+        let mut player = PlayerController::new(Transform {
+            x: 0.0,
+            y: 0.9,
+            z: 0.0,
+        });
+        player.grounded = true;
+        for _ in 0..40 {
+            player.tick(
+                MovementInput {
+                    forward: 1.0,
+                    ..Default::default()
+                },
+                0.0,
+                |_, _, _| false,
+            );
+        }
+        assert!((player.velocity[0] * TICKS_PER_SECOND - 4.317).abs() < 1.0e-9);
     }
 
     #[test]

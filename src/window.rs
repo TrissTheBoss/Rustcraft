@@ -1,12 +1,20 @@
 //! Minimal native Windows presentation layer for the dependency-free prototype.
 #![cfg(windows)]
 
+use std::collections::VecDeque;
 use std::ffi::c_void;
 use std::mem::size_of;
 use std::ptr::{null, null_mut};
+use std::time::Instant;
 
+use crate::blocks::Aabb;
 use crate::blocks::BlockRegistry;
+#[cfg(windows)]
+use crate::gpu::GpuRenderer;
 use crate::grid::PLAYER_EYE_OFFSET;
+use crate::interaction::{
+    break_block, place_full_block, raycast_blocks, PROTOTYPE_INTERACTION_REACH,
+};
 use crate::logger::Logger;
 use crate::movement::{GameMode, MovementInput, PlayerController};
 use crate::render::{
@@ -15,6 +23,7 @@ use crate::render::{
 };
 use crate::terrain::{TerrainGenerator, ROCK, SOIL, SURFACE};
 use crate::world::{ChunkPos, CHUNK_SIZE};
+use crate::world_store::{PlayerSnapshot, StoredGameMode, WorldMetadata, WorldStore};
 
 type Hinstance = *mut c_void;
 type Hwnd = *mut c_void;
@@ -24,6 +33,8 @@ type Wparam = usize;
 type Lparam = isize;
 
 const WM_DESTROY: u32 = 0x0002;
+const WM_COMMAND: u32 = 0x0111;
+const WM_CLOSE: u32 = 0x0010;
 const WM_PAINT: u32 = 0x000F;
 const WM_ERASEBKGND: u32 = 0x0014;
 const WM_TIMER: u32 = 0x0113;
@@ -37,11 +48,20 @@ const SW_SHOW: i32 = 5;
 const DIB_RGB_COLORS: u32 = 0;
 const SRCCOPY: u32 = 0x00CC0020;
 const TIMER_ID: usize = 1;
+const RENDER_TIMER_ID: usize = 2;
+const MENU_SAVE_WORLD: usize = 1001;
+const MENU_CREATE_WORLD: usize = 1002;
+const MENU_QUIT: usize = 1003;
+const MENU_WORLD_BASE: usize = 2000;
 const TICK_INTERVAL_MS: u32 = 50;
 const VK_ESCAPE: u32 = 0x1B;
 const WM_LBUTTONDOWN: u32 = 0x0201;
+const WM_RBUTTONDOWN: u32 = 0x0204;
+// The CPU renderer is supersampled 2x in each axis below. Keep the presented
+// target at a 16:9 960x540 cap so the anti-aliased path remains responsive.
 const MAX_RENDER_WIDTH: u32 = 960;
-const MAX_RENDER_HEIGHT: u32 = 600;
+const MAX_RENDER_HEIGHT: u32 = 540;
+const RENDER_SCALE: u32 = 2;
 const SM_CXSCREEN: i32 = 0;
 const SM_CYSCREEN: i32 = 1;
 
@@ -129,6 +149,15 @@ extern "system" {
     fn InvalidateRect(window: Hwnd, rect: *const Rect, erase: i32) -> i32;
     fn SetTimer(window: Hwnd, id: usize, interval: u32, callback: *mut c_void) -> usize;
     fn SetWindowTextW(window: Hwnd, title: *const u16) -> i32;
+    fn CreateMenu() -> *mut c_void;
+    fn CreatePopupMenu() -> *mut c_void;
+    fn AppendMenuW(menu: *mut c_void, flags: u32, item: usize, text: *const u16) -> i32;
+    fn SetMenu(window: Hwnd, menu: *mut c_void) -> i32;
+    fn GetMenu(window: Hwnd) -> *mut c_void;
+    fn DestroyMenu(menu: *mut c_void) -> i32;
+    fn PostMessageW(window: Hwnd, message: u32, wparam: Wparam, lparam: Lparam) -> i32;
+    fn DrawMenuBar(window: Hwnd) -> i32;
+    fn DestroyWindow(window: Hwnd) -> i32;
     fn ClipCursor(rect: *const Rect) -> i32;
     fn ShowCursor(show: i32) -> i32;
     fn GetWindowRect(window: Hwnd, rect: *mut Rect) -> i32;
@@ -173,7 +202,11 @@ static mut SCENE: Option<Scene> = None;
 struct Scene {
     world: crate::world::World,
     meshes: Vec<Mesh>,
+    mesh_positions: Vec<ChunkPos>,
     materials: MaterialRegistry,
+    block_textures: [Option<u16>; 4],
+    grass_top_texture: Option<u16>,
+    dirty: bool,
 }
 
 struct AppState {
@@ -188,7 +221,23 @@ struct AppState {
     render_height: u32,
     logger: Logger,
     player: PlayerController,
+    gpu: Option<GpuRenderer>,
+    last_physics: Instant,
+    selected_block: crate::world::BlockId,
+    last_jump_press: Option<Instant>,
+    jump_was_pressed: bool,
+    toggle_flight_pending: bool,
+    pending_block_actions: VecDeque<bool>,
+    world_store: Option<WorldStore>,
+    world_metadata: Option<WorldMetadata>,
+    menu_world_ids: Vec<String>,
+    last_save: Instant,
 }
+
+const MF_STRING: u32 = 0x0000;
+const MF_SEPARATOR: u32 = 0x0800;
+const MF_POPUP: u32 = 0x0010;
+const MF_GRAYED: u32 = 0x0001;
 
 fn wide(text: &str) -> Vec<u16> {
     text.encode_utf16().chain(std::iter::once(0)).collect()
@@ -202,6 +251,58 @@ unsafe extern "system" fn window_proc(
     lparam: Lparam,
 ) -> Lresult {
     match message {
+        WM_COMMAND => {
+            let command = wparam & 0xffff;
+            if let Some(app) = APP.as_mut() {
+                match command {
+                    MENU_SAVE_WORLD => {
+                        if let Some(scene) = SCENE.as_mut() {
+                            if scene.dirty {
+                                match persist_world(app, scene) {
+                                    Ok(()) => {
+                                        app.logger.event("INFO", "world_saved", "reason=menu")
+                                    }
+                                    Err(error) => app.logger.event(
+                                        "ERROR",
+                                        "world_save_failed",
+                                        error.to_string(),
+                                    ),
+                                }
+                            } else {
+                                app.logger
+                                    .event("INFO", "world_save_skipped", "reason=no_changes");
+                            }
+                        }
+                    }
+                    MENU_CREATE_WORLD => create_world_from_menu(window, app),
+                    MENU_QUIT => {
+                        PostMessageW(window, WM_CLOSE, 0, 0);
+                    }
+                    selected if selected >= MENU_WORLD_BASE => {
+                        let index = selected - MENU_WORLD_BASE;
+                        if let Some(id) = app.menu_world_ids.get(index).cloned() {
+                            open_world_from_menu(window, app, &id);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            0
+        }
+        WM_CLOSE => {
+            DestroyWindow(window);
+            0
+        }
+        0x0211 => {
+            if let Some(app) = APP.as_mut() {
+                if app.cursor_locked {
+                    app.cursor_locked = false;
+                    ClipCursor(null());
+                    ShowCursor(1);
+                }
+            }
+            0
+        }
         WM_PAINT => {
             let mut paint = PaintStruct {
                 hdc: null_mut(),
@@ -245,82 +346,147 @@ unsafe extern "system" fn window_proc(
             0
         }
         WM_ERASEBKGND => 1,
-        WM_TIMER if wparam == TIMER_ID => {
+        WM_TIMER => {
             if let Some(app) = APP.as_mut() {
-                app.logger.event("TRACE", "timer_tick", "interval_ms=50");
-                if let Some(scene) = SCENE.as_ref() {
-                    let input = MovementInput {
-                        forward: app.input.is_pressed(InputKey::Forward) as i32 as f64
-                            - app.input.is_pressed(InputKey::Backward) as i32 as f64,
-                        strafe: app.input.is_pressed(InputKey::Right) as i32 as f64
-                            - app.input.is_pressed(InputKey::Left) as i32 as f64,
-                        jump: app.input.is_pressed(InputKey::Up),
-                        sneak: app.input.is_pressed(InputKey::Down),
-                        sprint: app.input.is_pressed(InputKey::Sprint),
-                        toggle_flight: false,
-                    };
-                    app.player.tick(input, app.yaw as f64, |x, y, z| {
-                        let position = ChunkPos {
-                            x: x.div_euclid(CHUNK_SIZE as i32),
-                            y: y.div_euclid(CHUNK_SIZE as i32),
-                            z: z.div_euclid(CHUNK_SIZE as i32),
+                if wparam == TIMER_ID {
+                    app.logger.event("TRACE", "timer_tick", "interval_ms=50");
+                    if let Some(scene) = SCENE.as_ref() {
+                        let previous_transform = app.player.transform;
+                        let previous_velocity = app.player.velocity;
+                        let previous_flying = app.player.flying;
+                        let previous_grounded = app.player.grounded;
+                        let previous_mode = app.player.mode;
+                        let input = MovementInput {
+                            forward: app.input.is_pressed(InputKey::Forward) as i32 as f64
+                                - app.input.is_pressed(InputKey::Backward) as i32 as f64,
+                            strafe: app.input.is_pressed(InputKey::Right) as i32 as f64
+                                - app.input.is_pressed(InputKey::Left) as i32 as f64,
+                            jump: app.input.is_pressed(InputKey::Up),
+                            sneak: app.input.is_pressed(InputKey::Down),
+                            sprint: app.input.is_pressed(InputKey::Sprint),
+                            toggle_flight: app.toggle_flight_pending,
                         };
-                        let lx = x.rem_euclid(CHUNK_SIZE as i32) as usize;
-                        let ly = y.rem_euclid(CHUNK_SIZE as i32) as usize;
-                        let lz = z.rem_euclid(CHUNK_SIZE as i32) as usize;
-                        scene.world.get_chunk(position).is_some_and(|chunk| {
-                            BlockRegistry::new().is_solid(chunk.get(lx, ly, lz).unwrap())
-                        })
-                    });
-                    app.logger.event(
-                        "TRACE",
-                        "player_tick",
-                        format!(
-                            "x={:.4} y={:.4} z={:.4} vx={:.4} vy={:.4} vz={:.4} grounded={}",
+                        app.toggle_flight_pending = false;
+                        app.jump_was_pressed = app.input.is_pressed(InputKey::Up);
+                        app.player.tick(input, app.yaw as f64, |x, y, z| {
+                            let position = ChunkPos {
+                                x: x.div_euclid(CHUNK_SIZE as i32),
+                                y: y.div_euclid(CHUNK_SIZE as i32),
+                                z: z.div_euclid(CHUNK_SIZE as i32),
+                            };
+                            let lx = x.rem_euclid(CHUNK_SIZE as i32) as usize;
+                            let ly = y.rem_euclid(CHUNK_SIZE as i32) as usize;
+                            let lz = z.rem_euclid(CHUNK_SIZE as i32) as usize;
+                            scene.world.get_chunk(position).is_some_and(|chunk| {
+                                BlockRegistry::new().is_solid(chunk.get(lx, ly, lz).unwrap())
+                            })
+                        });
+                        if app.player.transform != previous_transform
+                            || app.player.velocity != previous_velocity
+                            || app.player.flying != previous_flying
+                            || app.player.grounded != previous_grounded
+                            || app.player.mode != previous_mode
+                        {
+                            if let Some(scene) = SCENE.as_mut() {
+                                scene.dirty = true;
+                            }
+                        }
+                        while let Some(breaking) = app.pending_block_actions.pop_front() {
+                            if let Some(scene) = SCENE.as_mut() {
+                                handle_block_action(app, scene, breaking);
+                            }
+                        }
+                        if app.last_save.elapsed().as_secs() >= 30 {
+                            if let Some(scene) = SCENE.as_mut() {
+                                if scene.dirty {
+                                    match persist_world(app, scene) {
+                                        Ok(()) => app.logger.event(
+                                            "INFO",
+                                            "world_autosaved",
+                                            "reason=dirty interval_seconds=30",
+                                        ),
+                                        Err(error) => app.logger.event(
+                                            "ERROR",
+                                            "world_autosave_failed",
+                                            error.to_string(),
+                                        ),
+                                    }
+                                }
+                            }
+                        }
+                        app.logger.event(
+                            "TRACE",
+                            "player_tick",
+                            format!(
+                                "x={:.4} y={:.4} z={:.4} vx={:.4} vy={:.4} vz={:.4} grounded={}",
+                                app.player.transform.x,
+                                app.player.transform.y,
+                                app.player.transform.z,
+                                app.player.velocity[0],
+                                app.player.velocity[1],
+                                app.player.velocity[2],
+                                app.player.grounded
+                            ),
+                        );
+                        let world_name = app
+                            .world_metadata
+                            .as_ref()
+                            .map(|metadata| metadata.name.as_str())
+                            .unwrap_or("Unsaved Prototype");
+                        let title = wide(&format!(
+                            "Voxel Engine 0.8.8 | {world_name} | Slot {} {} | block={:.2},{:.2},{:.2} speed={:.2} b/s",
+                            app.selected_block.0,
+                            BlockRegistry::new().definition(app.selected_block).name,
                             app.player.transform.x,
                             app.player.transform.y,
                             app.player.transform.z,
-                            app.player.velocity[0],
-                            app.player.velocity[1],
-                            app.player.velocity[2],
-                            app.player.grounded
-                        ),
-                    );
-                    let title = wide(&format!(
-                        "Voxel Engine 0.8.7 | block={:.2},{:.2},{:.2} speed={:.2} b/s",
-                        app.player.transform.x,
-                        app.player.transform.y,
-                        app.player.transform.z,
-                        (app.player.velocity[0].powi(2) + app.player.velocity[2].powi(2)).sqrt()
-                            * 20.0
-                    ));
-                    SetWindowTextW(window, title.as_ptr());
-                    app.camera.position = Vec3::new(
-                        app.player.transform.x as f32,
-                        (app.player.transform.y + PLAYER_EYE_OFFSET) as f32,
-                        app.player.transform.z as f32,
-                    );
+                            (app.player.velocity[0].powi(2) + app.player.velocity[2].powi(2))
+                                .sqrt()
+                                * 20.0
+                        ));
+                        SetWindowTextW(window, title.as_ptr());
+                    }
+                    app.last_physics = Instant::now();
                 }
                 let direction = Vec3::new(
                     app.pitch.cos() * app.yaw.cos(),
                     app.pitch.sin(),
                     app.pitch.cos() * app.yaw.sin(),
                 );
-                app.camera.target = app.camera.position + direction;
-                if let Some(scene) = SCENE.as_ref() {
-                    FRAME = Some(build_frame(
-                        app.camera,
-                        app.render_width,
-                        app.render_height,
-                        scene,
-                    ));
+                if wparam == RENDER_TIMER_ID {
+                    let alpha = (app.last_physics.elapsed().as_secs_f32() / 0.05).clamp(0.0, 1.0);
+                    let transform = app.player.previous_transform;
+                    let current = app.player.transform;
+                    let position = Vec3::new(
+                        (transform.x + (current.x - transform.x) * alpha as f64) as f32,
+                        (transform.y + (current.y - transform.y) * alpha as f64) as f32
+                            + PLAYER_EYE_OFFSET as f32,
+                        (transform.z + (current.z - transform.z) * alpha as f64) as f32,
+                    );
+                    app.camera.position = position;
                 }
-                app.logger.event(
-                    "TRACE",
-                    "frame_rendered",
-                    format!("width={} height={}", app.width, app.height),
-                );
-                InvalidateRect(window, null(), 0);
+                app.camera.target = app.camera.position + direction;
+                if wparam == RENDER_TIMER_ID {
+                    if let Some(gpu) = app.gpu.as_mut() {
+                        if let Err(error) = gpu.render(&app.camera) {
+                            app.logger.event("WARN", "gpu_frame_failed", error);
+                            app.gpu = None;
+                        }
+                    } else if let Some(scene) = SCENE.as_ref() {
+                        FRAME = Some(build_frame(
+                            app.camera,
+                            app.render_width,
+                            app.render_height,
+                            scene,
+                        ));
+                    }
+                    app.logger.event(
+                        "TRACE",
+                        "frame_rendered",
+                        format!("width={} height={}", app.width, app.height),
+                    );
+                    InvalidateRect(window, null(), 0);
+                }
             }
             0
         }
@@ -338,8 +504,15 @@ unsafe extern "system" fn window_proc(
                     GetClientRect(window, &mut client);
                     let center_x = (client.left + client.right) / 2;
                     let center_y = (client.top + client.bottom) / 2;
+                    let previous_yaw = app.yaw;
+                    let previous_pitch = app.pitch;
                     app.yaw += (x - center_x) as f32 * 0.006;
                     app.pitch = (app.pitch - (y - center_y) as f32 * 0.006).clamp(-1.45, 1.45);
+                    if app.yaw != previous_yaw || app.pitch != previous_pitch {
+                        if let Some(scene) = SCENE.as_mut() {
+                            scene.dirty = true;
+                        }
+                    }
                     if x != center_x || y != center_y {
                         app.logger.event(
                             "TRACE",
@@ -361,11 +534,42 @@ unsafe extern "system" fn window_proc(
                     app.logger.event("INFO", "cursor_released", "key=escape");
                 }
                 if let Some(key) = key_for(wparam as u32) {
+                    if key == InputKey::Up && message == WM_KEYDOWN && !app.jump_was_pressed {
+                        let now = Instant::now();
+                        if app
+                            .last_jump_press
+                            .is_some_and(|previous| now.duration_since(previous).as_millis() <= 300)
+                        {
+                            app.toggle_flight_pending = true;
+                            app.last_jump_press = None;
+                        } else {
+                            app.last_jump_press = Some(now);
+                        }
+                        app.jump_was_pressed = true;
+                    }
                     app.input.set(key, message == WM_KEYDOWN);
+                    if key == InputKey::Up && message == WM_KEYUP {
+                        app.jump_was_pressed = false;
+                    }
                     app.logger.event(
                         "TRACE",
                         "key_event",
                         format!("key={} pressed={}", wparam, message == WM_KEYDOWN),
+                    );
+                }
+                if message == WM_KEYDOWN && (0x31..=0x33).contains(&(wparam as u32)) {
+                    let selected_block = crate::world::BlockId((wparam as u16) - 0x30);
+                    if app.selected_block != selected_block {
+                        app.selected_block = selected_block;
+                        if let Some(scene) = SCENE.as_mut() {
+                            scene.dirty = true;
+                        }
+                    }
+                    let name = BlockRegistry::new().definition(app.selected_block).name;
+                    app.logger.event(
+                        "INFO",
+                        "hotbar_select",
+                        format!("slot={} block={name}", wparam - 0x30),
                     );
                 }
             }
@@ -373,6 +577,24 @@ unsafe extern "system" fn window_proc(
         }
         WM_LBUTTONDOWN => {
             if let Some(app) = APP.as_mut() {
+                if app.cursor_locked {
+                    queue_block_action(app, true);
+                    return 0;
+                }
+                app.cursor_locked = true;
+                ShowCursor(0);
+                lock_cursor(window);
+                app.logger
+                    .event("INFO", "cursor_captured", "source=mouse_click");
+            }
+            0
+        }
+        WM_RBUTTONDOWN => {
+            if let Some(app) = APP.as_mut() {
+                if app.cursor_locked {
+                    queue_block_action(app, false);
+                    return 0;
+                }
                 app.cursor_locked = true;
                 ShowCursor(0);
                 lock_cursor(window);
@@ -382,6 +604,22 @@ unsafe extern "system" fn window_proc(
             0
         }
         WM_DESTROY => {
+            if let (Some(app), Some(scene)) = (APP.as_mut(), SCENE.as_mut()) {
+                while let Some(breaking) = app.pending_block_actions.pop_front() {
+                    handle_block_action(app, scene, breaking);
+                }
+                if scene.dirty {
+                    match persist_world(app, scene) {
+                        Ok(()) => app
+                            .logger
+                            .event("INFO", "world_saved", "reason=window_close"),
+                        Err(error) => {
+                            app.logger
+                                .event("ERROR", "world_save_failed", error.to_string())
+                        }
+                    }
+                }
+            }
             PostQuitMessage(0);
             0
         }
@@ -422,31 +660,268 @@ unsafe fn lock_cursor(window: Hwnd) {
     }
 }
 
+unsafe fn build_main_menu(app: &mut AppState) -> *mut c_void {
+    let main = CreateMenu();
+    let worlds_menu = CreatePopupMenu();
+    let file_menu = CreatePopupMenu();
+    if main.is_null() || worlds_menu.is_null() || file_menu.is_null() {
+        return null_mut();
+    }
+
+    app.menu_world_ids.clear();
+    let create_label = wide("Create New World...");
+    AppendMenuW(
+        worlds_menu,
+        MF_STRING,
+        MENU_CREATE_WORLD,
+        create_label.as_ptr(),
+    );
+    AppendMenuW(worlds_menu, MF_SEPARATOR, 0, null());
+    if let Some(store) = app.world_store.as_ref() {
+        match store.list() {
+            Ok(worlds) => {
+                for summary in worlds.into_iter().take(500) {
+                    let index = app.menu_world_ids.len();
+                    let id = summary.id.clone();
+                    let name = summary.name.unwrap_or_else(|| summary.id.clone());
+                    let health = match summary.health {
+                        crate::world_store::WorldHealth::Ready => "",
+                        crate::world_store::WorldHealth::Corrupt => " [Corrupt]",
+                        crate::world_store::WorldHealth::UnsupportedVersion => " [Newer Version]",
+                        crate::world_store::WorldHealth::MissingSave => " [Missing Save]",
+                    };
+                    let label = wide(&format!("{name}{health}"));
+                    let flags = MF_STRING
+                        | if summary.health == crate::world_store::WorldHealth::Ready {
+                            0
+                        } else {
+                            MF_GRAYED
+                        };
+                    AppendMenuW(worlds_menu, flags, MENU_WORLD_BASE + index, label.as_ptr());
+                    app.menu_world_ids.push(id);
+                }
+            }
+            Err(error) => app
+                .logger
+                .event("ERROR", "world_list_failed", error.to_string()),
+        }
+    }
+    if app.menu_world_ids.is_empty() {
+        let empty = wide("No saved worlds");
+        AppendMenuW(worlds_menu, MF_STRING | MF_GRAYED, 0, empty.as_ptr());
+    }
+
+    let save = wide("Save World");
+    AppendMenuW(file_menu, MF_STRING, MENU_SAVE_WORLD, save.as_ptr());
+    let quit = wide("Quit");
+    AppendMenuW(file_menu, MF_STRING, MENU_QUIT, quit.as_ptr());
+    let worlds_title = wide("Worlds");
+    let file_title = wide("File");
+    AppendMenuW(main, MF_POPUP, worlds_menu as usize, worlds_title.as_ptr());
+    AppendMenuW(main, MF_POPUP, file_menu as usize, file_title.as_ptr());
+    main
+}
+
+unsafe fn install_main_menu(window: Hwnd, app: &mut AppState) {
+    let menu = build_main_menu(app);
+    if menu.is_null() {
+        return;
+    }
+    let previous = GetMenu(window);
+    SetMenu(window, menu);
+    DrawMenuBar(window);
+    if !previous.is_null() {
+        DestroyMenu(previous);
+    }
+}
+
+#[allow(static_mut_refs)]
+unsafe fn create_world_from_menu(window: Hwnd, app: &mut AppState) {
+    if let Some(scene) = SCENE.as_mut() {
+        if scene.dirty {
+            if let Err(error) = persist_world(app, scene) {
+                app.logger.event(
+                    "ERROR",
+                    "world_switch_blocked_by_save_failure",
+                    error.to_string(),
+                );
+                return;
+            }
+        }
+    }
+    let Some(store) = app.world_store.clone() else {
+        app.logger.event(
+            "ERROR",
+            "world_create_unavailable",
+            "world storage is unavailable",
+        );
+        return;
+    };
+    let seed = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos() as u64)
+        .unwrap_or(1);
+    let defaults = TerrainGenerator::default();
+    let world = TerrainGenerator { seed, ..defaults }.generate_region(2);
+    let name = match store.list() {
+        Ok(worlds) => format!("New World {}", worlds.len() + 1),
+        Err(error) => {
+            app.logger
+                .event("ERROR", "world_create_failed", error.to_string());
+            return;
+        }
+    };
+    match store.create(
+        &name,
+        seed,
+        StoredGameMode::Creative,
+        world,
+        PlayerSnapshot::default(),
+    ) {
+        Ok(created) => {
+            app.logger.event(
+                "INFO",
+                "world_created",
+                format!("id={} seed={seed}", created.metadata.id),
+            );
+            activate_world(window, app, created);
+        }
+        Err(error) => app
+            .logger
+            .event("ERROR", "world_create_failed", error.to_string()),
+    }
+}
+
+#[allow(static_mut_refs)]
+unsafe fn open_world_from_menu(window: Hwnd, app: &mut AppState, id: &str) {
+    if app
+        .world_metadata
+        .as_ref()
+        .is_some_and(|metadata| metadata.id == id)
+    {
+        return;
+    }
+    if let Some(scene) = SCENE.as_mut() {
+        if scene.dirty {
+            if let Err(error) = persist_world(app, scene) {
+                app.logger.event(
+                    "ERROR",
+                    "world_switch_blocked_by_save_failure",
+                    error.to_string(),
+                );
+                return;
+            }
+        }
+    }
+    let Some(store) = app.world_store.clone() else {
+        app.logger.event(
+            "ERROR",
+            "world_open_unavailable",
+            "world storage is unavailable",
+        );
+        return;
+    };
+    match store.load(id) {
+        Ok(saved) => activate_world(window, app, saved),
+        Err(error) => app
+            .logger
+            .event("ERROR", "world_open_failed", error.to_string()),
+    }
+}
+
+unsafe fn activate_world(window: Hwnd, app: &mut AppState, saved: crate::world_store::StoredWorld) {
+    app.player = player_controller(saved.player, saved.metadata.game_mode);
+    app.selected_block = saved.player.selected_block;
+    app.yaw = saved.player.yaw;
+    app.pitch = saved.player.pitch;
+    app.world_metadata = Some(saved.metadata);
+    app.input.clear();
+    app.pending_block_actions.clear();
+    app.jump_was_pressed = false;
+    app.last_jump_press = None;
+    app.last_physics = Instant::now();
+    let scene = build_scene(saved.world);
+    if let Some(gpu) = app.gpu.as_mut() {
+        let mesh_refs: Vec<&Mesh> = scene.meshes.iter().collect();
+        gpu.upload_meshes(&mesh_refs, &scene.materials);
+    } else {
+        FRAME = Some(build_frame(
+            app.camera,
+            app.render_width,
+            app.render_height,
+            &scene,
+        ));
+    }
+    SCENE = Some(scene);
+    install_main_menu(window, app);
+    let world_name = app
+        .world_metadata
+        .as_ref()
+        .map(|metadata| metadata.name.as_str())
+        .unwrap_or("Unknown World");
+    let title = wide(&format!("Voxel Engine 0.8.8 | {world_name}"));
+    SetWindowTextW(window, title.as_ptr());
+    InvalidateRect(window, null(), 0);
+    app.logger.event("INFO", "world_opened", world_name);
+}
+
 #[allow(static_mut_refs)]
 pub fn run(logger: Option<Logger>) {
+    let logger = logger.unwrap_or_else(|| Logger::start("voxel-engine.log").expect("logger"));
+    let loaded = WorldStore::default_root().and_then(|root| {
+        let store = WorldStore::new(root);
+        let generated = TerrainGenerator::default().generate_region(2);
+        let saved = store.open_or_create_prototype(generated)?;
+        Ok((store, saved))
+    });
+    let (world_store, world_metadata, initial_player, world) = match loaded {
+        Ok((store, saved)) => (Some(store), Some(saved.metadata), saved.player, saved.world),
+        Err(error) => {
+            logger.event(
+                "ERROR",
+                "world_open_failed",
+                format!("falling back to an unsaved prototype world: {error}"),
+            );
+            (
+                None,
+                None,
+                PlayerSnapshot::default(),
+                TerrainGenerator::default().generate_region(2),
+            )
+        }
+    };
+    let mode = world_metadata
+        .as_ref()
+        .map(|metadata| metadata.game_mode)
+        .unwrap_or(StoredGameMode::Creative);
+    let player = player_controller(initial_player, mode);
+    let scene = build_scene(world);
     let width = unsafe { GetSystemMetrics(SM_CXSCREEN) };
     let height = unsafe { GetSystemMetrics(SM_CYSCREEN) };
     unsafe {
         APP = Some(AppState {
             camera: Camera::default(),
             input: InputState::default(),
-            yaw: -2.16,
-            pitch: -0.4,
+            yaw: initial_player.yaw,
+            pitch: initial_player.pitch,
             cursor_locked: true,
             width,
             height,
             render_width: (width as u32).min(MAX_RENDER_WIDTH),
             render_height: (height as u32).min(MAX_RENDER_HEIGHT),
-            logger: logger.unwrap_or_else(|| Logger::start("voxel-engine.log").expect("logger")),
-            player: {
-                let mut player = PlayerController::new(crate::entity::Transform {
-                    x: 8.0,
-                    y: 12.0,
-                    z: 8.0,
-                });
-                player.mode = GameMode::Survival;
-                player
-            },
+            logger,
+            last_physics: Instant::now(),
+            gpu: None,
+            selected_block: initial_player.selected_block,
+            last_jump_press: None,
+            jump_was_pressed: false,
+            toggle_flight_pending: false,
+            pending_block_actions: VecDeque::new(),
+            world_store,
+            world_metadata,
+            menu_world_ids: Vec::new(),
+            last_save: Instant::now(),
+            player,
         });
         if let Some(app) = APP.as_ref() {
             app.logger.event(
@@ -455,7 +930,7 @@ pub fn run(logger: Option<Logger>) {
                 format!("width={} height={}", width, height),
             );
         }
-        SCENE = Some(build_scene());
+        SCENE = Some(scene);
         FRAME = Some(build_frame(
             Camera::default(),
             (width as u32).min(MAX_RENDER_WIDTH),
@@ -464,7 +939,7 @@ pub fn run(logger: Option<Logger>) {
         ));
     }
     let class = wide("VoxelEngineWindow");
-    let title = wide("Voxel Engine 0.8.4 - Java 26.3 Movement Prototype");
+    let title = wide("Voxel Engine 0.8.8 Creative Block Interaction Prototype");
     unsafe {
         let instance = GetModuleHandleW(null());
         let wnd_class = WndClassW {
@@ -494,7 +969,23 @@ pub fn run(logger: Option<Logger>) {
             instance,
             null_mut(),
         );
+        if let Some(app) = APP.as_mut() {
+            install_main_menu(window, app);
+        }
         SetTimer(window, TIMER_ID, TICK_INTERVAL_MS, null_mut());
+        SetTimer(window, RENDER_TIMER_ID, 16, null_mut());
+        if let Some(app) = APP.as_mut() {
+            match GpuRenderer::new(window as isize, width as u32, height as u32) {
+                Ok(mut gpu) => {
+                    let scene = SCENE.as_ref().unwrap();
+                    let mesh_refs: Vec<&Mesh> = scene.meshes.iter().collect();
+                    gpu.upload_meshes(&mesh_refs, &scene.materials);
+                    app.gpu = Some(gpu);
+                    app.logger.event("INFO", "render_backend", "wgpu_textured");
+                }
+                Err(error) => app.logger.event("WARN", "gpu_unavailable", error),
+            }
+        }
         ShowWindow(window, SW_SHOW);
         UpdateWindow(window);
         ShowCursor(0);
@@ -515,34 +1006,8 @@ pub fn run(logger: Option<Logger>) {
     }
 }
 
-fn build_scene() -> Scene {
-    let world = TerrainGenerator::default().generate_region(2);
-    let mut meshes = Vec::<Mesh>::new();
-    for z in -2..=2 {
-        for x in -2..=2 {
-            let position = ChunkPos { x, y: 0, z };
-            let chunk = world.get_chunk(position).unwrap();
-            let mut mesh = greedy_mesh_chunk(chunk, |local_x, local_y, local_z| {
-                let neighbor = ChunkPos {
-                    x: position.x + local_x.div_euclid(CHUNK_SIZE as i32),
-                    y: position.y + local_y.div_euclid(CHUNK_SIZE as i32),
-                    z: position.z + local_z.div_euclid(CHUNK_SIZE as i32),
-                };
-                let lx = local_x.rem_euclid(CHUNK_SIZE as i32) as usize;
-                let ly = local_y.rem_euclid(CHUNK_SIZE as i32) as usize;
-                let lz = local_z.rem_euclid(CHUNK_SIZE as i32) as usize;
-                world.get_chunk(neighbor).is_some_and(|candidate| {
-                    BlockRegistry::new().is_solid(candidate.get(lx, ly, lz).unwrap())
-                })
-            });
-            for vertex in &mut mesh.vertices {
-                vertex.position.x += (x * CHUNK_SIZE as i32) as f32;
-                vertex.position.z += (z * CHUNK_SIZE as i32) as f32;
-            }
-            mesh.recalculate_bounds();
-            meshes.push(mesh);
-        }
-    }
+fn build_scene(world: crate::world::World) -> Scene {
+    const REGION_RADIUS: i32 = 2;
     let mut materials = MaterialRegistry::default();
     let extracted = std::path::Path::new("assets/extracted/textures/blocks");
     let mut texture = |name: &str| {
@@ -552,6 +1017,7 @@ fn build_scene() -> Scene {
     };
     let dirt = texture("dirt.png");
     let grass = texture("grass_block_side.png");
+    let grass_top = texture("grass_block_top.png");
     let stone = texture("stone.png");
     drop(texture);
     materials
@@ -581,15 +1047,245 @@ fn build_scene() -> Scene {
             },
         )
         .unwrap();
+    let block_textures = [None, dirt, grass, stone];
+    let mesh_positions: Vec<_> = (-REGION_RADIUS..=REGION_RADIUS)
+        .flat_map(|z| (-REGION_RADIUS..=REGION_RADIUS).map(move |x| ChunkPos { x, y: 0, z }))
+        .collect();
+    let meshes = mesh_positions
+        .iter()
+        .map(|position| build_chunk_mesh(&world, *position, block_textures, grass_top.or(dirt)))
+        .collect();
     Scene {
         world,
         meshes,
+        mesh_positions,
         materials,
+        block_textures,
+        grass_top_texture: grass_top.or(dirt),
+        dirty: false,
     }
+}
+
+fn build_chunk_mesh(
+    world: &crate::world::World,
+    position: ChunkPos,
+    block_textures: [Option<u16>; 4],
+    grass_top: Option<u16>,
+) -> Mesh {
+    let Some(chunk) = world.get_chunk(position) else {
+        return Mesh::default();
+    };
+    let mut mesh = greedy_mesh_chunk(chunk, |local_x, local_y, local_z| {
+        let world_position = [
+            position.x * CHUNK_SIZE as i32 + local_x,
+            position.y * CHUNK_SIZE as i32 + local_y,
+            position.z * CHUNK_SIZE as i32 + local_z,
+        ];
+        world
+            .block_at(world_position)
+            .is_some_and(|block| BlockRegistry::new().is_solid(block))
+    });
+    for vertex in &mut mesh.vertices {
+        vertex.position.x += (position.x * CHUNK_SIZE as i32) as f32;
+        vertex.position.y += (position.y * CHUNK_SIZE as i32) as f32;
+        vertex.position.z += (position.z * CHUNK_SIZE as i32) as f32;
+        vertex.texture = match (vertex.block, vertex.normal.y) {
+            (SURFACE, y) if y > 0.5 => grass_top,
+            (SURFACE, y) if y < -0.5 => block_textures[1],
+            (SURFACE, _) => block_textures[2],
+            (SOIL, _) => block_textures[1],
+            (ROCK, _) => block_textures[3],
+            _ => None,
+        };
+    }
+    mesh.recalculate_bounds();
+    mesh
+}
+
+fn rebuild_meshes_for_block(scene: &mut Scene, world_position: [i32; 3]) {
+    let chunk_position = ChunkPos {
+        x: world_position[0].div_euclid(CHUNK_SIZE as i32),
+        y: world_position[1].div_euclid(CHUNK_SIZE as i32),
+        z: world_position[2].div_euclid(CHUNK_SIZE as i32),
+    };
+    let local = [
+        world_position[0].rem_euclid(CHUNK_SIZE as i32),
+        world_position[1].rem_euclid(CHUNK_SIZE as i32),
+        world_position[2].rem_euclid(CHUNK_SIZE as i32),
+    ];
+    let mut affected = vec![chunk_position];
+    for axis in 0..3 {
+        let direction = if local[axis] == 0 {
+            Some(-1)
+        } else if local[axis] == CHUNK_SIZE as i32 - 1 {
+            Some(1)
+        } else {
+            None
+        };
+        if let Some(direction) = direction {
+            let mut neighbor = chunk_position;
+            match axis {
+                0 => neighbor.x += direction,
+                1 => neighbor.y += direction,
+                _ => neighbor.z += direction,
+            }
+            affected.push(neighbor);
+        }
+    }
+    let world = &scene.world;
+    let block_textures = scene.block_textures;
+    let grass_top = scene.grass_top_texture;
+    for position in affected {
+        if let Some(index) = scene
+            .mesh_positions
+            .iter()
+            .position(|entry| *entry == position)
+        {
+            scene.meshes[index] = build_chunk_mesh(world, position, block_textures, grass_top);
+        }
+    }
+}
+
+fn queue_block_action(app: &mut AppState, breaking: bool) {
+    if app.pending_block_actions.len() >= 16 {
+        app.logger
+            .event("WARN", "block_action_queue_full", "dropping excess input");
+        return;
+    }
+    app.pending_block_actions.push_back(breaking);
+}
+
+fn handle_block_action(app: &mut AppState, scene: &mut Scene, breaking: bool) {
+    let player = app.player.transform;
+    let origin = [player.x, player.y + PLAYER_EYE_OFFSET, player.z];
+    let direction = [
+        app.pitch.cos() * app.yaw.cos(),
+        app.pitch.sin(),
+        app.pitch.cos() * app.yaw.sin(),
+    ];
+    let Some(hit) = raycast_blocks(
+        &scene.world,
+        &BlockRegistry::new(),
+        origin,
+        [
+            direction[0] as f64,
+            direction[1] as f64,
+            direction[2] as f64,
+        ],
+        PROTOTYPE_INTERACTION_REACH,
+    ) else {
+        app.logger
+            .event("TRACE", "block_action_miss", "no target in reach");
+        return;
+    };
+    let position = hit.position.0;
+    let changed = if breaking {
+        break_block(&mut scene.world, hit).is_some()
+    } else {
+        let player = app.player.transform;
+        let half = app.player.half_extents;
+        place_full_block(
+            &mut scene.world,
+            &BlockRegistry::new(),
+            hit,
+            app.selected_block,
+            Aabb {
+                min: [player.x - half[0], player.y - half[1], player.z - half[2]],
+                max: [player.x + half[0], player.y + half[1], player.z + half[2]],
+            },
+        )
+    };
+    if changed {
+        scene.dirty = true;
+        let changed_position = if breaking {
+            position
+        } else {
+            [
+                position[0] + hit.face_normal[0],
+                position[1] + hit.face_normal[1],
+                position[2] + hit.face_normal[2],
+            ]
+        };
+        rebuild_meshes_for_block(scene, changed_position);
+        if let Some(gpu) = app.gpu.as_mut() {
+            let mesh_refs: Vec<&Mesh> = scene.meshes.iter().collect();
+            gpu.upload_meshes(&mesh_refs, &scene.materials);
+        }
+    }
+    app.logger.event(
+        if changed { "INFO" } else { "TRACE" },
+        if breaking {
+            "block_break"
+        } else {
+            "block_place"
+        },
+        format!(
+            "target={},{},{} block={} changed={changed}",
+            position[0], position[1], position[2], hit.block.0
+        ),
+    );
+}
+
+fn player_controller(snapshot: PlayerSnapshot, mode: StoredGameMode) -> PlayerController {
+    let mut player = PlayerController::new(crate::entity::Transform {
+        x: snapshot.position[0],
+        y: snapshot.position[1],
+        z: snapshot.position[2],
+    });
+    player.previous_transform = player.transform;
+    player.velocity = snapshot.velocity;
+    player.mode = match mode {
+        StoredGameMode::Creative => GameMode::Creative,
+        StoredGameMode::Spectator => GameMode::Spectator,
+        StoredGameMode::Survival | StoredGameMode::Adventure => GameMode::Survival,
+    };
+    player.flying = snapshot.flying;
+    player.grounded = snapshot.grounded;
+    player
+}
+
+fn stored_game_mode(mode: GameMode) -> StoredGameMode {
+    match mode {
+        GameMode::Survival => StoredGameMode::Survival,
+        GameMode::Creative => StoredGameMode::Creative,
+        GameMode::Spectator => StoredGameMode::Spectator,
+    }
+}
+
+fn persist_world(app: &mut AppState, scene: &mut Scene) -> std::io::Result<()> {
+    let store = app.world_store.as_ref().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::NotFound, "world storage is unavailable")
+    })?;
+    let metadata = app.world_metadata.as_mut().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "world metadata is unavailable",
+        )
+    })?;
+    metadata.game_mode = stored_game_mode(app.player.mode);
+    let snapshot = PlayerSnapshot {
+        position: [
+            app.player.transform.x,
+            app.player.transform.y,
+            app.player.transform.z,
+        ],
+        velocity: app.player.velocity,
+        yaw: app.yaw,
+        pitch: app.pitch,
+        flying: app.player.flying,
+        grounded: app.player.grounded,
+        selected_block: app.selected_block,
+    };
+    store.save(metadata, &scene.world, snapshot)?;
+    scene.dirty = false;
+    app.last_save = Instant::now();
+    Ok(())
 }
 
 fn build_frame(camera: Camera, width: u32, height: u32, scene: &Scene) -> (Vec<u8>, BitmapInfo) {
     let mesh_refs: Vec<&Mesh> = scene.meshes.iter().collect();
+    let render_width = width * RENDER_SCALE;
+    let render_height = height * RENDER_SCALE;
     let frame = CpuRenderer {
         clear_color: [92, 142, 190],
     }
@@ -598,15 +1294,33 @@ fn build_frame(camera: Camera, width: u32, height: u32, scene: &Scene) -> (Vec<u
         &camera,
         &scene.materials,
         DirectionalLight::default(),
-        width,
-        height,
+        render_width,
+        render_height,
     )
     .unwrap();
-    let pixels = frame
-        .color
-        .iter()
-        .flat_map(|pixel| [pixel[2], pixel[1], pixel[0], 0])
-        .collect();
+    let mut pixels = Vec::with_capacity((width * height * 4) as usize);
+    for y in 0..height {
+        for x in 0..width {
+            let mut sum = [0u32; 3];
+            for sy in 0..RENDER_SCALE {
+                for sx in 0..RENDER_SCALE {
+                    let index =
+                        ((y * RENDER_SCALE + sy) * render_width + x * RENDER_SCALE + sx) as usize;
+                    let pixel = frame.color[index];
+                    sum[0] += pixel[0] as u32;
+                    sum[1] += pixel[1] as u32;
+                    sum[2] += pixel[2] as u32;
+                }
+            }
+            let samples = RENDER_SCALE * RENDER_SCALE;
+            pixels.extend([
+                (sum[2] / samples) as u8,
+                (sum[1] / samples) as u8,
+                (sum[0] / samples) as u8,
+                0,
+            ]);
+        }
+    }
     let info = BitmapInfo {
         header: BitmapInfoHeader {
             size: size_of::<BitmapInfoHeader>() as u32,

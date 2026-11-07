@@ -192,6 +192,10 @@ pub struct InputState {
 }
 
 impl InputState {
+    pub fn clear(&mut self) {
+        self.pressed.clear();
+    }
+
     pub fn set(&mut self, key: InputKey, pressed: bool) {
         if pressed && !self.pressed.contains(&key) {
             self.pressed.push(key);
@@ -321,6 +325,9 @@ pub struct Vertex {
     pub position: Vec3,
     pub normal: Vec3,
     pub block: BlockId,
+    /// Optional face-specific texture selected by the scene material setup.
+    /// `None` keeps the block's default material texture.
+    pub texture: Option<u16>,
     pub uv: [f32; 2],
 }
 
@@ -390,6 +397,7 @@ pub fn mesh_chunk(chunk: &Chunk, mut is_solid: impl FnMut(i32, i32, i32) -> bool
                                 position,
                                 normal: face.normal(),
                                 block,
+                                texture: None,
                                 uv,
                             }),
                     );
@@ -526,19 +534,33 @@ fn add_quad(
         ],
     };
     let first = mesh.vertices.len() as u32;
-    for (point, uv) in points
-        .into_iter()
-        .zip([[0.0, 0.0], [0.0, h], [w, h], [w, 0.0]])
-    {
+    for point in points {
+        let uv = face_uv(face, point, x, y, z, w, h);
         mesh.vertices.push(Vertex {
             position: point,
             normal: face.normal(),
             block,
+            texture: None,
             uv,
         });
     }
     mesh.indices
         .extend_from_slice(&[first, first + 1, first + 2, first, first + 2, first + 3]);
+}
+
+fn face_uv(face: Face, point: Vec3, x: f32, y: f32, z: f32, width: f32, height: f32) -> [f32; 2] {
+    match face {
+        Face::NegativeX | Face::PositiveX => {
+            [(point.z - z).abs().min(width), height - (point.y - y)]
+        }
+        Face::NegativeY | Face::PositiveY => [
+            (point.x - x).abs().min(width),
+            (point.z - z).abs().min(height),
+        ],
+        Face::NegativeZ | Face::PositiveZ => {
+            [(point.x - x).abs().min(width), height - (point.y - y)]
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -662,13 +684,20 @@ pub fn load_png(path: impl AsRef<std::path::Path>) -> io::Result<RgbImage> {
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?
         .decode()
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?
-        .to_rgb8();
+        .to_rgba8();
     Ok(RgbImage {
         width: image.width(),
         height: image.height(),
         pixels: image
             .pixels()
-            .map(|pixel| [pixel[0], pixel[1], pixel[2]])
+            .map(|pixel| {
+                let alpha = pixel[3] as u16;
+                [
+                    ((pixel[0] as u16 * alpha + 255 * (255 - alpha)) / 255) as u8,
+                    ((pixel[1] as u16 * alpha + 255 * (255 - alpha)) / 255) as u8,
+                    ((pixel[2] as u16 * alpha + 255 * (255 - alpha)) / 255) as u8,
+                ]
+            })
             .collect(),
     })
 }
@@ -756,11 +785,19 @@ impl MaterialRegistry {
         self.textures.push(image);
         Ok(id)
     }
+
+    pub fn texture(&self, id: u16) -> Option<&RgbImage> {
+        self.textures.get(id as usize)
+    }
+
+    pub fn texture_count(&self) -> usize {
+        self.textures.len()
+    }
     fn sample(&self, material: Material, uv: [f32; 2]) -> [u8; 3] {
-        let Some(texture) = material
-            .texture
-            .and_then(|id| self.textures.get(id as usize))
-        else {
+        let Some(texture_id) = material.texture else {
+            return material.color;
+        };
+        let Some(texture) = self.textures.get(texture_id as usize) else {
             return material.color;
         };
         let u = uv[0].rem_euclid(1.0);
@@ -874,6 +911,7 @@ impl Renderer for CpuRenderer {
                         &mut frame,
                         screen,
                         clipped.map(|value| value.vertex),
+                        clipped.map(|value| 1.0 / value.clip[3]),
                         materials,
                         light,
                     );
@@ -916,6 +954,7 @@ fn interpolate_clip(a: ClipVertex, b: ClipVertex, amount: f32) -> ClipVertex {
             position: a.vertex.position + (b.vertex.position - a.vertex.position) * amount,
             normal: (a.vertex.normal + (b.vertex.normal - a.vertex.normal) * amount).normalized(),
             block: a.vertex.block,
+            texture: a.vertex.texture,
             uv: [
                 lerp(a.vertex.uv[0], b.vertex.uv[0]),
                 lerp(a.vertex.uv[1], b.vertex.uv[1]),
@@ -963,6 +1002,7 @@ fn raster_triangle(
     frame: &mut Frame,
     p: [[f32; 3]; 3],
     v: [Vertex; 3],
+    inv_w: [f32; 3],
     materials: &MaterialRegistry,
     light: DirectionalLight,
 ) {
@@ -991,7 +1031,10 @@ fn raster_triangle(
         .cross(v[2].position - v[0].position)
         .normalized();
     let intensity = light.brightness(normal);
-    let material = materials.get(v[0].block);
+    let mut material = materials.get(v[0].block);
+    if let Some(texture) = v[0].texture {
+        material.texture = Some(texture);
+    }
     for y in min_y..=max_y {
         for x in min_x..=max_x {
             let (px, py) = (x as f32 + 0.5, y as f32 + 0.5);
@@ -1002,9 +1045,16 @@ fn raster_triangle(
                 continue;
             }
             let depth = w0 * p[0][2] + w1 * p[1][2] + w2 * p[2][2];
+            let reciprocal_w = w0 * inv_w[0] + w1 * inv_w[1] + w2 * inv_w[2];
             let uv = [
-                w0 * v[0].uv[0] + w1 * v[1].uv[0] + w2 * v[2].uv[0],
-                w0 * v[0].uv[1] + w1 * v[1].uv[1] + w2 * v[2].uv[1],
+                (w0 * v[0].uv[0] * inv_w[0]
+                    + w1 * v[1].uv[0] * inv_w[1]
+                    + w2 * v[2].uv[0] * inv_w[2])
+                    / reciprocal_w,
+                (w0 * v[0].uv[1] * inv_w[0]
+                    + w1 * v[1].uv[1] * inv_w[1]
+                    + w2 * v[2].uv[1] * inv_w[2])
+                    / reciprocal_w,
             ];
             let index = y as usize * frame.width as usize + x as usize;
             if depth >= 0.0 && depth < frame.depth[index] {
@@ -1118,6 +1168,16 @@ mod tests {
         assert!(camera.position != Camera::default().position);
         input.set(InputKey::Forward, false);
         assert!(!input.is_pressed(InputKey::Forward));
+    }
+
+    #[test]
+    fn clearing_input_releases_all_held_actions() {
+        let mut input = InputState::default();
+        input.set(InputKey::Forward, true);
+        input.set(InputKey::Sprint, true);
+        input.clear();
+        assert!(!input.is_pressed(InputKey::Forward));
+        assert!(!input.is_pressed(InputKey::Sprint));
     }
 
     #[test]

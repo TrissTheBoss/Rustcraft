@@ -2,7 +2,10 @@
 pub mod asset_extract;
 pub mod blocks;
 pub mod entity;
+#[cfg(windows)]
+pub mod gpu;
 pub mod grid;
+pub mod interaction;
 pub mod logger;
 pub mod movement;
 pub mod networking;
@@ -13,6 +16,7 @@ pub mod terrain;
 #[cfg(windows)]
 pub mod window;
 pub mod world;
+pub mod world_store;
 
 pub const ENGINE_NAME: &str = "Voxel Engine";
 

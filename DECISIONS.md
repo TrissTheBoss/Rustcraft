@@ -12,6 +12,12 @@ The engine uses original code, original assets, and independently authored speci
 
 Ordinary Minecraft-server compatibility and complete vanilla parity are not current features. They require public-specification study, legal review, conformance tests, and explicit evidence before any claim.
 
+## 2026-11-06 — Product requirements describe parity as a versioned end state
+
+The product destination includes a detailed Java Edition parity ambition, but parity is evaluated against one pinned release and a documented observable-behavior matrix. The PRD distinguishes this end state from implemented functionality and preserves the clean-room, original-content, and local-only user-owned asset boundaries. Exact conformance baselines are chosen before that work begins.
+
+The parity scope is the complete unmodified game runtime, including all built-in gameplay and client behavior; it does not make this project a launcher or distributor of game files. Any platform-service or account-dependent limitation must be disclosed, and it prevents an unqualified 100% claim unless supported through authorized flows.
+
 ## 2026-11-06 — Foundation before renderer
 
 The first implementation establishes testable world, entity, resource, and networking boundaries before selecting a renderer or platform abstraction.
@@ -23,6 +29,18 @@ Chunk persistence reads and writes the existing contiguous block array directly,
 ## 2026-11-06 — Fixed-step deterministic simulation
 
 Simulation advances through an explicit fixed-step accumulator and stores bodies in a `BTreeMap` so tick order is stable by entity ID. The first collision boundary is an original ground plane at y=0; richer voxel collision remains a later increment.
+
+## 2026-11-07 — Queue world edits for simulation ticks
+
+Player block actions enter a bounded input queue and mutate only loaded chunks on the 20 Hz simulation tick. Ray hits are revalidated at mutation time, placement checks collision-shape overlap with the player body, and changed meshes are rebuilt for the edited chunk and face-adjacent chunk boundaries. This provides a deterministic Creative prototype path without claiming Survival mining, inventory transactions, or complete placement rules.
+
+## 2026-11-07 — Persist world and player snapshots as bounded atomic saves
+
+The Windows prototype uses an application-data world directory, a versioned single-file snapshot containing world metadata, chunk data, and player state, and a checksum for accidental corruption detection. Decoding enforces file/chunk/name/player bounds and rejects duplicate chunks, truncation, trailing bytes, and unsupported versions. Saves replace through a same-directory temporary file with a durable Windows replacement operation, and preserve up to five prior snapshots. Until the world-selection UI exists, the client opens one fixed Creative prototype world; corrupt saves are logged and left untouched rather than regenerated over.
+
+## 2026-11-07 — Use a native menu as the first world-selection bridge
+
+The Windows prototype exposes save, create seeded Creative world, and open-ready-world actions through a native menu so persisted worlds can be exercised before a complete custom UI exists. Corrupt, missing, and newer-format worlds are displayed as unavailable; switching saves the current dirty world first and is blocked if that save fails. This bridge does not satisfy the PRD's world-management or menu design requirements; editing world options, deletion, backup recovery, pause behavior, and the styled cross-platform UI remain planned.
 
 ## 2026-11-06 — Keep rendering core dependency-free until graphics dependencies are available
 

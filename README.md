@@ -6,7 +6,11 @@ Voxel Engine is a clean-room Rust project for building an original voxel game en
 
 The roadmap covers original implementations of rendering, world/chunk storage and streaming, meshing, lighting, entities, collision, deterministic simulation, networking, resource formats, and developer tooling.
 
+The intended final product, including detailed menus and settings, gameplay systems, release gates, and a versioned Java Edition parity program, is specified in [prd.md](prd.md). The PRD describes future requirements; it is not a statement that they are implemented.
+
 The current `0.8.8` build contains the world foundation, deterministic terrain generation, a Java Edition 26.3-targeted movement controller wired into the Windows player loop, fixed-step simulation with voxel collision queries and replay snapshots, and an optimized dependency-free CPU rendering pipeline. Movement advances at 20 Hz, uses explicit 16-block chunk/grid coordinates, supports one-block jump clearance, and caps airborne horizontal speed to prevent momentum accumulation.
+
+The Windows scene currently opens a bounded generated region in Creative prototype mode. The native **Worlds** menu can create a seeded prototype world or reopen a listed save; **File** can save dirty changes or quit. New worlds currently use generated terrain, Creative mode, and a default player spawn. The menu has no name/seed/game-mode editor, delete or recovery screen, pause flow, or full styled interface. Left click breaks the targeted block; right click places the selected prototype block; keys 1-3 select soil, surface, and rock. Edits use loaded chunks only and are applied on the simulation tick. This is not the finished inventory or survival-mining flow. The storage layer is tested, but interactive menu/world switching and the GPU hardware path still need runtime verification.
 
 ## Compatibility boundary
 
@@ -24,7 +28,7 @@ cargo run --release
 
 For repeatable local testing, run `.uild-release.ps1`; it refreshes `target/release/voxel-engine.exe`. The executable is generated output and remains intentionally excluded from Git.
 
-The release command executes the headless prototype scene and does not write world or build data.
+On Windows, the release command opens the interactive prototype, which stores worlds under `%LOCALAPPDATA%\VoxelEngine\worlds`, autosaves dirty state every 30 seconds, saves on normal close, and retains up to five backups. The storage layer is tested; the integrated window lifecycle and native world menu have compile coverage but still need runtime verification. On other platforms the command runs a headless CPU-rendered demo. Logs and any permitted local texture cache use their documented local paths.
 
 For a local, user-owned Java client JAR, run `cargo run --release -- --extract-assets [path-to-client.jar]`. If no path is supplied, the utility searches the platform's default `.minecraft` location, including the Linux Flatpak location, and extracts only block textures, block `.png.mcmeta` files, and item textures into the ignored `assets/extracted/` directory. The source JAR is read-only and no network access occurs during extraction.
 
