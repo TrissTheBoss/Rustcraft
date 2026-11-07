@@ -22,6 +22,10 @@ The parity scope is the complete unmodified game runtime, including all built-in
 
 The first target is the official stable Minecraft: Java Edition 26.3 release, announced 2026-09-15. This matches the release family referenced by earlier movement experiments but does not treat those experiments as conformance evidence. The initial test cell is Windows x86-64, unmodified single-player with the integrated server, default resources/options, English (US), and keyboard/mouse. Other platforms, contexts, and account-dependent services require separate cells. Per-run launcher manifest, artifact hashes, and Java runtime must be captured from an authorized local installation before a case can be verified. The baseline record is `docs/compatibility/java-26.3.md`; selecting it proves no feature behavior.
 
+## 2026-11-07 — Pause before resuming or saving the active world
+
+The Escape pause screen is modal and sets the same local simulation pause gate used by other native forms. It clears held movement/mining input, releases captured mouse state, and restores the prior capture state only on Resume. Save & Quit persists dirty world/player state first; a persistence error leaves the screen open for recovery. Closing the application from the window chrome retains the existing window-close save path. This is a functional native prototype; settings, accessibility, disconnect, and reference-specific menu behavior remain incomplete.
+
 ## 2026-11-06 — Foundation before renderer
 
 The first implementation establishes testable world, entity, resource, and networking boundaries before selecting a renderer or platform abstraction.

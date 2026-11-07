@@ -82,6 +82,8 @@ const INVENTORY_SLOT_COUNT: usize = 41;
 const INVENTORY_MODE_ID: usize = INVENTORY_SLOT_ID_BASE + INVENTORY_SLOT_COUNT;
 const INVENTORY_DROP_ID: usize = INVENTORY_MODE_ID + 1;
 const INVENTORY_CLOSE_ID: usize = INVENTORY_DROP_ID + 1;
+const PAUSE_RESUME_ID: usize = 8100;
+const PAUSE_SAVE_QUIT_ID: usize = PAUSE_RESUME_ID + 1;
 const CB_ADDSTRING: u32 = 0x0143;
 const CB_SETCURSEL: u32 = 0x014E;
 const CB_GETCURSEL: u32 = 0x0147;
@@ -259,6 +261,7 @@ static mut APP: Option<AppState> = None;
 static mut SCENE: Option<Scene> = None;
 static mut WORLD_FORM: Option<WorldCreationForm> = None;
 static mut INVENTORY_FORM: Option<InventoryForm> = None;
+static mut PAUSE_FORM: Option<PauseForm> = None;
 
 struct Scene {
     world: crate::world::World,
@@ -327,6 +330,12 @@ struct InventoryForm {
     cursor_was_locked: bool,
 }
 
+struct PauseForm {
+    controls: Vec<Hwnd>,
+    status_label: Hwnd,
+    cursor_was_locked: bool,
+}
+
 const MF_STRING: u32 = 0x0000;
 const MF_SEPARATOR: u32 = 0x0800;
 const MF_POPUP: u32 = 0x0010;
@@ -347,6 +356,9 @@ unsafe extern "system" fn window_proc(
         WM_COMMAND => {
             let command = wparam & 0xffff;
             if handle_inventory_command(window, command) {
+                return 0;
+            }
+            if handle_pause_command(window, command) {
                 return 0;
             }
             if WORLD_FORM.is_some() && command == DIALOG_IDCANCEL {
@@ -457,6 +469,7 @@ unsafe extern "system" fn window_proc(
                 close_inventory_form(window);
                 return 0;
             }
+            destroy_pause_form();
             DestroyWindow(window);
             0
         }
@@ -770,21 +783,24 @@ unsafe extern "system" fn window_proc(
                 }
                 return 0;
             }
+            if PAUSE_FORM.is_some() {
+                if wparam as u32 == VK_ESCAPE && message == WM_KEYDOWN && is_initial_keydown(lparam)
+                {
+                    close_pause_form(window);
+                }
+                return 0;
+            }
             if wparam as u32 == VK_E && message == WM_KEYDOWN {
                 if APP.as_ref().is_some_and(|app| !app.dialog_open) {
                     open_inventory_form(window);
                     return 0;
                 }
             }
+            if wparam as u32 == VK_ESCAPE && message == WM_KEYDOWN && is_initial_keydown(lparam) {
+                open_pause_form(window);
+                return 0;
+            }
             if let Some(app) = APP.as_mut() {
-                if wparam as u32 == VK_ESCAPE && message == WM_KEYDOWN {
-                    app.cursor_locked = false;
-                    app.breaking_held = false;
-                    app.mining_session.reset();
-                    ClipCursor(null());
-                    ShowCursor(1);
-                    app.logger.event("INFO", "cursor_released", "key=escape");
-                }
                 if let Some(key) = key_for(wparam as u32) {
                     if key == InputKey::Up && message == WM_KEYDOWN && !app.jump_was_pressed {
                         let now = Instant::now();
@@ -884,6 +900,7 @@ unsafe extern "system" fn window_proc(
         }
         WM_DESTROY => {
             destroy_world_creation_form();
+            destroy_pause_form();
             if let (Some(app), Some(scene)) = (APP.as_mut(), SCENE.as_mut()) {
                 while let Some(breaking) = app.pending_block_actions.pop_front() {
                     handle_block_action(app, scene, breaking);
@@ -918,6 +935,10 @@ fn key_for(key: u32) -> Option<InputKey> {
         0x10 => Some(InputKey::Sprint),
         _ => None,
     }
+}
+
+fn is_initial_keydown(lparam: Lparam) -> bool {
+    lparam as usize & 0x4000_0000 == 0
 }
 
 unsafe fn lock_cursor(window: Hwnd) {
@@ -1253,6 +1274,193 @@ unsafe fn set_inventory_status(message: &str) {
     if let Some(form) = INVENTORY_FORM.as_ref() {
         let text = wide(message);
         SetWindowTextW(form.status_label, text.as_ptr());
+    }
+}
+
+#[allow(static_mut_refs)]
+unsafe fn open_pause_form(window: Hwnd) {
+    if PAUSE_FORM.is_some() || INVENTORY_FORM.is_some() || WORLD_FORM.is_some() {
+        return;
+    }
+    let cursor_was_locked = APP.as_ref().is_some_and(|app| app.cursor_locked);
+    if let Some(app) = APP.as_mut() {
+        app.dialog_open = true;
+        app.cursor_locked = false;
+        app.breaking_held = false;
+        app.mining_session.reset();
+        app.input.clear();
+        app.last_physics = Instant::now();
+        app.logger.event("INFO", "pause_opened", "source=escape");
+    } else {
+        return;
+    }
+    ClipCursor(null());
+    if cursor_was_locked {
+        ShowCursor(1);
+    }
+
+    let mut client = Rect {
+        left: 0,
+        top: 0,
+        right: 0,
+        bottom: 0,
+    };
+    GetClientRect(window, &mut client);
+    let width = 360;
+    let height = 226;
+    let left = ((client.right - width) / 2).max(12);
+    let top = ((client.bottom - height) / 2).max(12);
+    let mut controls = Vec::new();
+    controls.push(create_form_control(
+        window,
+        "STATIC",
+        "Paused",
+        0,
+        left + 24,
+        top + 18,
+        width - 48,
+        28,
+        0,
+    ));
+    controls.push(create_form_control(
+        window,
+        "STATIC",
+        "Options and accessibility settings are not implemented yet.",
+        0,
+        left + 24,
+        top + 50,
+        width - 48,
+        34,
+        0,
+    ));
+    let resume_button = create_form_control(
+        window,
+        "BUTTON",
+        "Resume",
+        BS_DEFPUSHBUTTON | WS_TABSTOP,
+        left + 24,
+        top + 92,
+        width - 48,
+        34,
+        PAUSE_RESUME_ID,
+    );
+    controls.push(resume_button);
+    controls.push(create_form_control(
+        window,
+        "BUTTON",
+        "Save & Quit",
+        BS_PUSHBUTTON | WS_TABSTOP,
+        left + 24,
+        top + 132,
+        width - 48,
+        34,
+        PAUSE_SAVE_QUIT_ID,
+    ));
+    let status_label = create_form_control(
+        window,
+        "STATIC",
+        "",
+        0,
+        left + 24,
+        top + 174,
+        width - 48,
+        32,
+        0,
+    );
+    controls.push(status_label);
+    PAUSE_FORM = Some(PauseForm {
+        controls,
+        status_label,
+        cursor_was_locked,
+    });
+    if !resume_button.is_null() {
+        SetFocus(resume_button);
+    }
+    InvalidateRect(window, null(), 0);
+}
+
+#[allow(static_mut_refs)]
+unsafe fn handle_pause_command(window: Hwnd, command: usize) -> bool {
+    if PAUSE_FORM.is_none() {
+        return false;
+    }
+    match command {
+        PAUSE_RESUME_ID | DIALOG_IDCANCEL => close_pause_form(window),
+        PAUSE_SAVE_QUIT_ID => save_and_quit_from_pause(window),
+        _ => return true,
+    }
+    true
+}
+
+#[allow(static_mut_refs)]
+unsafe fn save_and_quit_from_pause(window: Hwnd) {
+    let result = match (APP.as_mut(), SCENE.as_mut()) {
+        (Some(app), Some(scene)) if scene.dirty => persist_world(app, scene),
+        _ => Ok(()),
+    };
+    if let Err(error) = result {
+        if let Some(form) = PAUSE_FORM.as_ref() {
+            let text = wide(&format!("Could not save world: {error}"));
+            SetWindowTextW(form.status_label, text.as_ptr());
+        }
+        if let Some(app) = APP.as_ref() {
+            app.logger
+                .event("ERROR", "pause_save_quit_failed", error.to_string());
+        }
+        return;
+    }
+
+    let was_cursor_locked = PAUSE_FORM
+        .as_ref()
+        .is_some_and(|form| form.cursor_was_locked);
+    destroy_pause_form();
+    if let Some(app) = APP.as_mut() {
+        app.dialog_open = false;
+        app.cursor_locked = false;
+        app.input.clear();
+        app.logger
+            .event("INFO", "pause_save_quit", "world_saved=true");
+    }
+    ClipCursor(null());
+    if was_cursor_locked {
+        ShowCursor(1);
+    }
+    PostMessageW(window, WM_CLOSE, 0, 0);
+}
+
+#[allow(static_mut_refs)]
+unsafe fn close_pause_form(window: Hwnd) {
+    let restore_cursor = PAUSE_FORM
+        .as_ref()
+        .is_some_and(|form| form.cursor_was_locked);
+    destroy_pause_form();
+    if let Some(app) = APP.as_mut() {
+        app.dialog_open = false;
+        app.cursor_locked = false;
+        app.input.clear();
+        app.last_physics = Instant::now();
+        app.logger.event("INFO", "pause_closed", "action=resume");
+        if restore_cursor {
+            app.cursor_locked = true;
+        }
+    }
+    ClipCursor(null());
+    if restore_cursor {
+        ShowCursor(0);
+        lock_cursor(window);
+    }
+    SetFocus(window);
+    InvalidateRect(window, null(), 0);
+}
+
+#[allow(static_mut_refs)]
+unsafe fn destroy_pause_form() {
+    if let Some(form) = PAUSE_FORM.take() {
+        for control in form.controls.into_iter().rev() {
+            if !control.is_null() {
+                DestroyWindow(control);
+            }
+        }
     }
 }
 
@@ -1817,8 +2025,8 @@ fn optional_seed(text: &str) -> Result<u64, ()> {
 #[cfg(test)]
 mod world_creation_tests {
     use super::{
-        inventory_slot, optional_seed, player_controller, stored_game_mode, GameMode,
-        InventorySlot, StoredGameMode,
+        inventory_slot, is_initial_keydown, optional_seed, player_controller, stored_game_mode,
+        GameMode, InventorySlot, StoredGameMode,
     };
     use crate::world_store::PlayerSnapshot;
 
@@ -1868,6 +2076,12 @@ mod world_creation_tests {
         );
         assert_eq!(inventory_slot(40), Some(InventorySlot::Offhand));
         assert_eq!(inventory_slot(41), None);
+    }
+
+    #[test]
+    fn pause_escape_ignores_repeated_keydown_messages() {
+        assert!(is_initial_keydown(0));
+        assert!(!is_initial_keydown(0x4000_0000));
     }
 }
 
@@ -2596,7 +2810,7 @@ pub fn run(logger: Option<Logger>) {
             private: 0,
         };
         while GetMessageW(&mut message, null_mut(), 0, 0) > 0 {
-            if (WORLD_FORM.is_some() || INVENTORY_FORM.is_some())
+            if (WORLD_FORM.is_some() || INVENTORY_FORM.is_some() || PAUSE_FORM.is_some())
                 && IsDialogMessageW(window, &message) != 0
             {
                 continue;
