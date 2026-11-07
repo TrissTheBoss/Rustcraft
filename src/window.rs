@@ -275,6 +275,9 @@ extern "system" {
     fn PostMessageW(window: Hwnd, message: u32, wparam: Wparam, lparam: Lparam) -> i32;
     fn MessageBoxW(window: Hwnd, text: *const u16, caption: *const u16, flags: u32) -> i32;
     fn SendMessageW(window: Hwnd, message: u32, wparam: Wparam, lparam: Lparam) -> Lresult;
+    fn RedrawWindow(window: Hwnd, rect: *const Rect, region: *mut c_void, flags: u32) -> i32;
+    fn GetParent(window: Hwnd) -> Hwnd;
+    fn MoveWindow(window: Hwnd, x: i32, y: i32, width: i32, height: i32, repaint: i32) -> i32;
     fn GetWindowTextLengthW(window: Hwnd) -> i32;
     fn GetWindowTextW(window: Hwnd, text: *mut u16, max_chars: i32) -> i32;
     fn GetKeyState(key: i32) -> i16;
@@ -386,7 +389,13 @@ struct AppState {
     player: PlayerController,
     vitals: PlayerVitals,
     food: crate::survival::FoodState,
+    activity_exhaustion: crate::survival::ActivityExhaustion,
     gpu: Option<GpuRenderer>,
+    viewport: Hwnd,
+    presenting_dialog: bool,
+    last_menu_frame: Instant,
+    gpu_frame_count: u32,
+    gpu_frame_window: Instant,
     last_physics: Instant,
     physics_clock: FixedStepClock,
     selected_block: crate::world::BlockId,
@@ -483,6 +492,36 @@ fn wide(text: &str) -> Vec<u16> {
 }
 
 #[allow(static_mut_refs)]
+unsafe extern "system" fn viewport_proc(
+    window: Hwnd,
+    message: u32,
+    wparam: Wparam,
+    lparam: Lparam,
+) -> Lresult {
+    match message {
+        WM_MOUSEMOVE | WM_LBUTTONDOWN | WM_LBUTTONUP | WM_RBUTTONDOWN | WM_RBUTTONUP
+        | WM_MBUTTONDOWN | WM_MOUSEWHEEL => {
+            SendMessageW(GetParent(window), message, wparam, lparam)
+        }
+        WM_ERASEBKGND => 1,
+        WM_PAINT => {
+            let mut paint: PaintStruct = std::mem::zeroed();
+            let hdc = BeginPaint(window, &mut paint);
+            if let (Some(app), Some(scene)) = (APP.as_ref(), SCENE.as_ref()) {
+                if !app.dialog_open {
+                    let mut client: Rect = std::mem::zeroed();
+                    GetClientRect(window, &mut client);
+                    paint_hud(hdc, client, app, scene);
+                }
+            }
+            EndPaint(window, &paint);
+            0
+        }
+        _ => DefWindowProcW(window, message, wparam, lparam),
+    }
+}
+
+#[allow(static_mut_refs)]
 unsafe extern "system" fn window_proc(
     window: Hwnd,
     message: u32,
@@ -490,6 +529,26 @@ unsafe extern "system" fn window_proc(
     lparam: Lparam,
 ) -> Lresult {
     match message {
+        0x0005 => {
+            // WM_SIZE
+            let width = (lparam as u32 & 0xffff) as i32;
+            let height = ((lparam as u32 >> 16) & 0xffff) as i32;
+            if width > 0 && height > 0 {
+                if let Some(app) = APP.as_mut() {
+                    app.width = width;
+                    app.height = height;
+                    app.render_width = (width as u32).min(MAX_RENDER_WIDTH);
+                    app.render_height = (height as u32).min(MAX_RENDER_HEIGHT);
+                    if !app.viewport.is_null() {
+                        MoveWindow(app.viewport, 0, 0, width, height, 1);
+                    }
+                    if let Some(gpu) = app.gpu.as_mut() {
+                        gpu.resize(width as u32, height as u32);
+                    }
+                }
+            }
+            0
+        }
         WM_COMMAND => {
             let command = wparam & 0xffff;
             if handle_title_command(window, command) {
@@ -666,7 +725,10 @@ unsafe extern "system" fn window_proc(
                 reserved: [0; 32],
             };
             let hdc = BeginPaint(window, &mut paint);
-            if !APP.as_ref().is_some_and(|app| app.gpu.is_some()) {
+            if !APP
+                .as_ref()
+                .is_some_and(|app| app.gpu.is_some() && !app.dialog_open)
+            {
                 if let Some((pixels, info)) = FRAME.as_ref() {
                     let mut client = Rect {
                         left: 0,
@@ -693,7 +755,7 @@ unsafe extern "system" fn window_proc(
                 }
             }
             if let (Some(app), Some(scene)) = (APP.as_ref(), SCENE.as_ref()) {
-                if !app.dialog_open {
+                if !app.dialog_open && app.gpu.is_none() {
                     let mut client = Rect {
                         left: 0,
                         top: 0,
@@ -727,7 +789,7 @@ unsafe extern "system" fn window_proc(
                             let previous_flying = app.player.flying;
                             let previous_grounded = app.player.grounded;
                             let previous_mode = app.player.mode;
-                            let input = MovementInput {
+                            let mut input = MovementInput {
                                 forward: app.input.is_pressed(InputKey::Forward) as i32 as f64
                                     - app.input.is_pressed(InputKey::Backward) as i32 as f64,
                                 strafe: app.input.is_pressed(InputKey::Right) as i32 as f64
@@ -743,6 +805,13 @@ unsafe extern "system" fn window_proc(
                                 ),
                                 toggle_flight: app.toggle_flight_pending,
                             };
+                            let uses_hunger =
+                                matches!(app.player.mode, GameMode::Survival | GameMode::Adventure)
+                                    && !app.vitals.is_dead();
+                            if uses_hunger {
+                                input.sprint &=
+                                    app.food.can_sprint() && input.forward > 0.0 && !input.sneak;
+                            }
                             app.toggle_flight_pending = false;
                             app.jump_was_pressed = app.input.is_pressed(InputKey::Up);
                             let fall_distance = app.player.tick_with_collision_shapes(
@@ -761,6 +830,26 @@ unsafe extern "system" fn window_proc(
                                     }
                                 },
                             );
+                            if uses_hunger && !previous_flying && !app.player.flying {
+                                let dx = app.player.transform.x - previous_transform.x;
+                                let dz = app.player.transform.z - previous_transform.z;
+                                let sprint_distance = if input.sprint && previous_grounded {
+                                    dx.hypot(dz)
+                                } else {
+                                    0.0
+                                };
+                                let cost = app.activity_exhaustion.record(
+                                    sprint_distance,
+                                    input.jump && previous_grounded,
+                                    input.sprint,
+                                );
+                                if cost > 0 {
+                                    app.food.apply_exhaustion(cost);
+                                    if let Some(scene) = SCENE.as_mut() {
+                                        scene.dirty = true;
+                                    }
+                                }
+                            }
                             if let Some(distance) = fall_distance {
                                 if matches!(
                                     app.player.mode,
@@ -1025,18 +1114,69 @@ unsafe extern "system" fn window_proc(
                 }
                 app.camera.target = app.camera.position + direction;
                 if wparam == RENDER_TIMER_ID {
-                    if let Some(gpu) = app.gpu.as_mut() {
+                    let transition = app.presenting_dialog != app.dialog_open;
+                    if transition {
+                        app.presenting_dialog = app.dialog_open;
+                        ShowWindow(
+                            app.viewport,
+                            if app.dialog_open || app.gpu.is_none() {
+                                0
+                            } else {
+                                SW_SHOW
+                            },
+                        );
+                        app.gpu_frame_count = 0;
+                        app.gpu_frame_window = Instant::now();
+                        app.logger.event(
+                            "INFO",
+                            "render_backend",
+                            if app.dialog_open {
+                                "menu_cpu_gdi"
+                            } else {
+                                "gameplay_wgpu_textured"
+                            },
+                        );
+                        RedrawWindow(window, null(), null_mut(), 0x185);
+                    }
+                    if let Some(gpu) = app.gpu.as_mut().filter(|_| !app.dialog_open) {
                         if let Err(error) = gpu.render(&app.camera) {
                             app.logger.event("WARN", "gpu_frame_failed", error);
                             app.gpu = None;
+                            ShowWindow(app.viewport, 0);
+                        } else {
+                            app.gpu_frame_count += 1;
+                            let seconds = app.gpu_frame_window.elapsed().as_secs_f64();
+                            if seconds >= 2.0 {
+                                app.logger.event(
+                                    "INFO",
+                                    "gpu_frame_rate",
+                                    format!(
+                                        "frames={} seconds={seconds:.3} fps={:.1}",
+                                        app.gpu_frame_count,
+                                        f64::from(app.gpu_frame_count) / seconds
+                                    ),
+                                );
+                                app.gpu_frame_count = 0;
+                                app.gpu_frame_window = Instant::now();
+                            }
                         }
-                    } else if let Some(scene) = SCENE.as_ref() {
+                        InvalidateRect(app.viewport, null(), 0);
+                    } else if (!app.dialog_open
+                        || transition
+                        || app.last_menu_frame.elapsed().as_millis() >= 250)
+                        && SCENE.is_some()
+                    {
+                        let scene = SCENE.as_ref().unwrap();
                         FRAME = Some(build_frame(
                             app.camera,
                             app.render_width,
                             app.render_height,
                             scene,
                         ));
+                        app.last_menu_frame = Instant::now();
+                        if transition && app.dialog_open {
+                            RedrawWindow(window, null(), null_mut(), 0x185);
+                        }
                     }
                     InvalidateRect(window, null(), 0);
                 }
@@ -1073,13 +1213,6 @@ unsafe extern "system" fn window_proc(
                         if let Some(scene) = SCENE.as_mut() {
                             scene.dirty = true;
                         }
-                    }
-                    if x != center_x || y != center_y {
-                        app.logger.event(
-                            "TRACE",
-                            "mouse_look",
-                            format!("dx={} dy={}", x - center_x, y - center_y),
-                        );
                     }
                     lock_cursor(window);
                 }
@@ -4626,6 +4759,7 @@ unsafe fn activate_world(window: Hwnd, app: &mut AppState, saved: crate::world_s
     app.player = player_controller(&saved.player, saved.metadata.game_mode);
     app.vitals = PlayerVitals::from_saved_health(saved.player.health).unwrap_or_default();
     app.food = saved.player.food;
+    app.activity_exhaustion = crate::survival::ActivityExhaustion::default();
     app.death_items_retained = false;
     app.selected_block = saved.player.selected_block;
     app.inventory = saved.player.inventory;
@@ -4837,6 +4971,11 @@ pub fn run(logger: Option<Logger>) {
             last_physics: Instant::now(),
             physics_clock: FixedStepClock::default(),
             gpu: None,
+            viewport: null_mut(),
+            presenting_dialog: true,
+            last_menu_frame: Instant::now(),
+            gpu_frame_count: 0,
+            gpu_frame_window: Instant::now(),
             selected_block: initial_player.selected_block,
             hotbar_scroll_remainder: 0,
             inventory: initial_player.inventory,
@@ -4865,6 +5004,7 @@ pub fn run(logger: Option<Logger>) {
             player,
             vitals: PlayerVitals::from_saved_health(initial_player.health).unwrap_or_default(),
             food: initial_player.food,
+            activity_exhaustion: crate::survival::ActivityExhaustion::default(),
         });
         if let Some(app) = APP.as_ref() {
             app.logger.event(
@@ -4902,7 +5042,7 @@ pub fn run(logger: Option<Logger>) {
             0,
             class.as_ptr(),
             title.as_ptr(),
-            WS_OVERLAPPEDWINDOW,
+            WS_OVERLAPPEDWINDOW | 0x0200_0000,
             0,
             0,
             width,
@@ -4914,6 +5054,49 @@ pub fn run(logger: Option<Logger>) {
         );
         if let Some(app) = APP.as_mut() {
             install_main_menu(window, app);
+            let viewport_class = wide("VoxelEngineViewport");
+            let viewport_registration = WndClassW {
+                style: CS_HREDRAW | CS_VREDRAW,
+                wnd_proc: Some(viewport_proc),
+                extra_class: 0,
+                extra_window: 0,
+                instance,
+                icon: null_mut(),
+                cursor: null_mut(),
+                background: null_mut(),
+                menu: null(),
+                name: viewport_class.as_ptr(),
+            };
+            RegisterClassW(&viewport_registration);
+            let mut client: Rect = std::mem::zeroed();
+            GetClientRect(window, &mut client);
+            app.viewport = CreateWindowExW(
+                0,
+                viewport_class.as_ptr(),
+                null(),
+                WS_CHILD | 0x0400_0000,
+                0,
+                0,
+                client.right,
+                client.bottom,
+                window,
+                null_mut(),
+                instance,
+                null_mut(),
+            );
+            match GpuRenderer::new(
+                app.viewport as isize,
+                client.right.max(1) as u32,
+                client.bottom.max(1) as u32,
+            ) {
+                Ok(mut gpu) => {
+                    if let Some(scene) = SCENE.as_ref() {
+                        upload_scene_meshes(&mut gpu, scene);
+                    }
+                    app.gpu = Some(gpu);
+                }
+                Err(error) => app.logger.event("WARN", "gpu_unavailable", error),
+            }
         }
         SetTimer(window, TIMER_ID, TICK_INTERVAL_MS, null_mut());
         SetTimer(window, RENDER_TIMER_ID, 16, null_mut());
@@ -4924,7 +5107,7 @@ pub fn run(logger: Option<Logger>) {
             app.logger.event(
                 "INFO",
                 "render_backend",
-                "cpu_gdi_native_menu_composited_gpu_ui_pending",
+                "startup_menu_cpu_gdi_gameplay_gpu_on_resume",
             );
         }
         ShowWindow(window, SW_SHOW);
@@ -5344,6 +5527,9 @@ fn handle_block_action(app: &mut AppState, scene: &mut Scene, breaking: bool) {
         }
     };
     if changed {
+        if breaking && app.player.mode == GameMode::Survival {
+            app.food.apply_exhaustion(5);
+        }
         scene.dirty = true;
         if breaking && app.player.mode == GameMode::Survival {
             scene.drop_meshes = build_drop_meshes(&app.drops);

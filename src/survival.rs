@@ -10,6 +10,36 @@ pub const MAX_FOOD_LEVEL: u8 = 20;
 pub const MAX_FOOD_SATURATION_MILLI: u16 = 20_000;
 pub const EXHAUSTION_PER_FOOD_POINT_MILLI: u16 = 4_000;
 
+/// Provisional activity rates. Fractional milli-exhaustion is kept between
+/// ticks so a slow rendering cadence cannot change distance-based costs.
+#[derive(Default)]
+pub struct ActivityExhaustion {
+    fractional_milli: f64,
+}
+
+impl ActivityExhaustion {
+    pub fn record(&mut self, sprint_distance: f64, jumped: bool, sprinting: bool) -> u32 {
+        let distance = if sprint_distance.is_finite() && (0.0..=16.0).contains(&sprint_distance) {
+            sprint_distance
+        } else {
+            0.0
+        };
+        let total = self.fractional_milli + distance * 100.0;
+        let distance_cost = (total + 1e-9).floor() as u32;
+        self.fractional_milli = (total - f64::from(distance_cost)).max(0.0);
+        distance_cost
+            + if jumped {
+                if sprinting {
+                    200
+                } else {
+                    50
+                }
+            } else {
+                0
+            }
+    }
+}
+
 /// Saved hunger state. Exact exhaustion sources and thresholds must be checked
 /// against the pinned Java Edition runtime before this is treated as parity.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -52,6 +82,10 @@ impl FoodState {
 
     pub const fn food_level(self) -> u8 {
         self.food_level
+    }
+
+    pub const fn can_sprint(self) -> bool {
+        self.food_level > 6
     }
 
     pub const fn saturation_milli(self) -> u16 {
@@ -169,6 +203,20 @@ impl PlayerVitals {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn activity_cost_preserves_fractional_distance_and_jump_events() {
+        let mut costs = super::ActivityExhaustion::default();
+        let total: u32 = (0..1000).map(|_| costs.record(0.001, false, true)).sum();
+        assert_eq!(total, 100);
+        assert_eq!(costs.record(0.0, true, false), 50);
+        assert_eq!(costs.record(0.0, true, true), 200);
+        assert_eq!(costs.record(f64::NAN, false, false), 0);
+        let mut food = super::FoodState::from_saved(7, 0, 3950).unwrap();
+        assert!(food.can_sprint());
+        food.apply_exhaustion(50);
+        assert_eq!(food.food_level(), 6);
+        assert!(!food.can_sprint());
+    }
     use super::*;
 
     #[test]
