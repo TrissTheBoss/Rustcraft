@@ -18,7 +18,7 @@ Press **E** to open the native player-inventory prototype. It displays the 36 ma
 
 ## Compatibility boundary
 
-This project contains no Minecraft source, decompiled code, proprietary assets, authentication bypasses, or copied protocol implementation. It does not currently connect to ordinary Minecraft servers and makes no claim of vanilla parity.
+This project contains no Minecraft source, decompiled code, proprietary assets, authentication bypasses, or copied protocol implementation. Its first conformance target is the stable Java Edition 26.3 release, recorded in [the baseline profile](docs/compatibility/java-26.3.md). It does not currently connect to ordinary Minecraft servers and makes no claim of vanilla parity; selecting a target release is not evidence of conformance.
 
 “100% vanilla parity” is an acceptance target requiring exhaustive independent testing and legal review; it cannot be promised in advance. Any future compatibility work must use public specifications, independently authored tests, and user-owned environments.
 

@@ -18,6 +18,10 @@ The product destination includes a detailed Java Edition parity ambition, but pa
 
 The parity scope is the complete unmodified game runtime, including all built-in gameplay and client behavior; it does not make this project a launcher or distributor of game files. Any platform-service or account-dependent limitation must be disclosed, and it prevents an unqualified 100% claim unless supported through authorized flows.
 
+## 2026-11-07 — Pin the first Java Edition conformance baseline
+
+The first target is the official stable Minecraft: Java Edition 26.3 release, announced 2026-09-15. This matches the release family referenced by earlier movement experiments but does not treat those experiments as conformance evidence. The initial test cell is Windows x86-64, unmodified single-player with the integrated server, default resources/options, English (US), and keyboard/mouse. Other platforms, contexts, and account-dependent services require separate cells. Per-run launcher manifest, artifact hashes, and Java runtime must be captured from an authorized local installation before a case can be verified. The baseline record is `docs/compatibility/java-26.3.md`; selecting it proves no feature behavior.
+
 ## 2026-11-06 — Foundation before renderer
 
 The first implementation establishes testable world, entity, resource, and networking boundaries before selecting a renderer or platform abstraction.
