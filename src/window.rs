@@ -28,7 +28,9 @@ use crate::render::{
     greedy_mesh_chunk, load_png, Camera, CpuRenderer, DirectionalLight, InputKey, InputState,
     Material, MaterialRegistry, Mesh, Renderer, Vec3,
 };
-use crate::settings::{BindingAction, KeyBindingError, KeyBindings, Settings, SettingsStore};
+use crate::settings::{
+    BindingAction, HoldToggle, KeyBindingError, KeyBindings, Settings, SettingsStore,
+};
 use crate::terrain::{TerrainGenerator, ROCK, SOIL, SURFACE};
 use crate::world::{ChunkPos, CHUNK_SIZE};
 use crate::world_store::{
@@ -89,7 +91,9 @@ const PAUSE_OPTIONS_ID: usize = PAUSE_SAVE_QUIT_ID + 1;
 const OPTIONS_FOV_ID: usize = 8110;
 const OPTIONS_SENSITIVITY_ID: usize = OPTIONS_FOV_ID + 1;
 const OPTIONS_INVERT_ID: usize = OPTIONS_SENSITIVITY_ID + 1;
-const OPTIONS_APPLY_ID: usize = OPTIONS_INVERT_ID + 1;
+const OPTIONS_SPRINT_TOGGLE_ID: usize = OPTIONS_INVERT_ID + 1;
+const OPTIONS_SNEAK_TOGGLE_ID: usize = OPTIONS_SPRINT_TOGGLE_ID + 1;
+const OPTIONS_APPLY_ID: usize = OPTIONS_SNEAK_TOGGLE_ID + 1;
 const OPTIONS_DEFAULTS_ID: usize = OPTIONS_APPLY_ID + 1;
 const OPTIONS_BACK_ID: usize = OPTIONS_DEFAULTS_ID + 1;
 const OPTIONS_BINDING_ID_BASE: usize = 8120;
@@ -309,6 +313,8 @@ struct AppState {
     mining_catalog: MiningCatalog,
     mining_session: MiningSession,
     breaking_held: bool,
+    sprint_toggled: bool,
+    sneak_toggled: bool,
     last_jump_press: Option<Instant>,
     jump_was_pressed: bool,
     toggle_flight_pending: bool,
@@ -353,6 +359,8 @@ struct OptionsForm {
     field_of_view_edit: Hwnd,
     sensitivity_edit: Hwnd,
     invert_mouse_y_check: Hwnd,
+    sprint_toggle_check: Hwnd,
+    sneak_toggle_check: Hwnd,
     status_label: Hwnd,
     binding_buttons: Vec<(BindingAction, Hwnd)>,
     key_bindings: KeyBindings,
@@ -571,8 +579,14 @@ unsafe extern "system" fn window_proc(
                             strafe: app.input.is_pressed(InputKey::Right) as i32 as f64
                                 - app.input.is_pressed(InputKey::Left) as i32 as f64,
                             jump: app.input.is_pressed(InputKey::Up),
-                            sneak: app.input.is_pressed(InputKey::Down),
-                            sprint: app.input.is_pressed(InputKey::Sprint),
+                            sneak: app
+                                .settings
+                                .sneak_behavior
+                                .active(app.input.is_pressed(InputKey::Down), app.sneak_toggled),
+                            sprint: app
+                                .settings
+                                .sprint_behavior
+                                .active(app.input.is_pressed(InputKey::Sprint), app.sprint_toggled),
                             toggle_flight: app.toggle_flight_pending,
                         };
                         app.toggle_flight_pending = false;
@@ -881,7 +895,27 @@ unsafe extern "system" fn window_proc(
                         }
                         app.jump_was_pressed = true;
                     }
-                    app.input.set(key, message == WM_KEYDOWN);
+                    let key_down = message == WM_KEYDOWN;
+                    let initial_press = key_down && is_initial_keydown(lparam);
+                    match key {
+                        InputKey::Sprint if app.settings.sprint_behavior == HoldToggle::Toggle => {
+                            app.sprint_toggled = if key_down {
+                                HoldToggle::Toggle.after_key_down(app.sprint_toggled, initial_press)
+                            } else {
+                                HoldToggle::Toggle.after_key_up(app.sprint_toggled)
+                            };
+                            app.input.set(key, false);
+                        }
+                        InputKey::Down if app.settings.sneak_behavior == HoldToggle::Toggle => {
+                            app.sneak_toggled = if key_down {
+                                HoldToggle::Toggle.after_key_down(app.sneak_toggled, initial_press)
+                            } else {
+                                HoldToggle::Toggle.after_key_up(app.sneak_toggled)
+                            };
+                            app.input.set(key, false);
+                        }
+                        _ => app.input.set(key, key_down),
+                    }
                     if key == InputKey::Up && message == WM_KEYUP {
                         app.jump_was_pressed = false;
                     }
@@ -944,6 +978,8 @@ unsafe extern "system" fn window_proc(
         }
         WM_KILLFOCUS => {
             if let Some(app) = APP.as_mut() {
+                app.input.clear();
+                app.jump_was_pressed = false;
                 app.breaking_held = false;
                 app.mining_session.reset();
             }
@@ -1596,7 +1632,7 @@ unsafe fn open_options_form(window: Hwnd) {
     };
     GetClientRect(window, &mut client);
     let width = 520;
-    let height = 560;
+    let height = 580;
     let left = ((client.right - width) / 2).max(12);
     let top = ((client.bottom - height) / 2).max(12);
     let current_settings = APP.as_ref().map(|app| app.settings).unwrap_or_default();
@@ -1679,32 +1715,50 @@ unsafe fn open_options_form(window: Hwnd) {
         SendMessageW(invert_mouse_y_check, BM_SETCHECK, BST_CHECKED as usize, 0);
     }
     controls.push(invert_mouse_y_check);
-    let status_label = create_form_control(
+    let sprint_toggle_check = create_form_control(
         window,
-        "STATIC",
-        "Project settings are not yet verified against Java Edition 26.3.",
-        0,
+        "BUTTON",
+        "Toggle sprint (off = hold)",
+        BS_AUTOCHECKBOX | WS_TABSTOP,
         left + 24,
-        top + 456,
+        top + 204,
         width - 48,
-        38,
-        0,
+        28,
+        OPTIONS_SPRINT_TOGGLE_ID,
     );
-    controls.push(status_label);
+    if current_settings.sprint_behavior == HoldToggle::Toggle {
+        SendMessageW(sprint_toggle_check, BM_SETCHECK, BST_CHECKED as usize, 0);
+    }
+    controls.push(sprint_toggle_check);
+    let sneak_toggle_check = create_form_control(
+        window,
+        "BUTTON",
+        "Toggle sneak (off = hold)",
+        BS_AUTOCHECKBOX | WS_TABSTOP,
+        left + 24,
+        top + 234,
+        width - 48,
+        28,
+        OPTIONS_SNEAK_TOGGLE_ID,
+    );
+    if current_settings.sneak_behavior == HoldToggle::Toggle {
+        SendMessageW(sneak_toggle_check, BM_SETCHECK, BST_CHECKED as usize, 0);
+    }
+    controls.push(sneak_toggle_check);
     controls.push(create_form_control(
         window,
         "STATIC",
         "Click a movement action, then press a key. Escape cancels binding.",
         0,
         left + 24,
-        top + 190,
+        top + 264,
         width - 48,
         22,
         0,
     ));
     let mut binding_buttons = Vec::with_capacity(BindingAction::ALL.len());
     for (index, action) in BindingAction::ALL.into_iter().enumerate() {
-        let row_y = top + 216 + index as i32 * 34;
+        let row_y = top + 286 + index as i32 * 34;
         controls.push(create_form_control(
             window,
             "STATIC",
@@ -1730,13 +1784,25 @@ unsafe fn open_options_form(window: Hwnd) {
         binding_buttons.push((action, button));
         controls.push(button);
     }
+    let status_label = create_form_control(
+        window,
+        "STATIC",
+        "Project settings are not yet verified against Java Edition 26.3.",
+        0,
+        left + 24,
+        top + 520,
+        width - 48,
+        24,
+        0,
+    );
+    controls.push(status_label);
     controls.push(create_form_control(
         window,
         "BUTTON",
         "Use Defaults",
         BS_PUSHBUTTON | WS_TABSTOP,
         left + 24,
-        top + 510,
+        top + 546,
         120,
         34,
         OPTIONS_DEFAULTS_ID,
@@ -1747,7 +1813,7 @@ unsafe fn open_options_form(window: Hwnd) {
         "Apply",
         BS_DEFPUSHBUTTON | WS_TABSTOP,
         left + 160,
-        top + 510,
+        top + 546,
         120,
         34,
         OPTIONS_APPLY_ID,
@@ -1758,7 +1824,7 @@ unsafe fn open_options_form(window: Hwnd) {
         "Back",
         BS_PUSHBUTTON | WS_TABSTOP,
         left + 296,
-        top + 510,
+        top + 546,
         120,
         34,
         OPTIONS_BACK_ID,
@@ -1768,6 +1834,8 @@ unsafe fn open_options_form(window: Hwnd) {
         field_of_view_edit,
         sensitivity_edit,
         invert_mouse_y_check,
+        sprint_toggle_check,
+        sneak_toggle_check,
         status_label,
         binding_buttons,
         key_bindings: current_settings.key_bindings,
@@ -1795,6 +1863,8 @@ unsafe fn handle_options_command(window: Hwnd, command: usize) -> bool {
                 SetWindowTextW(form.field_of_view_edit, fov.as_ptr());
                 SetWindowTextW(form.sensitivity_edit, sensitivity.as_ptr());
                 SendMessageW(form.invert_mouse_y_check, BM_SETCHECK, 0, 0);
+                SendMessageW(form.sprint_toggle_check, BM_SETCHECK, 0, 0);
+                SendMessageW(form.sneak_toggle_check, BM_SETCHECK, 0, 0);
                 form.binding_buttons
                     .iter()
                     .zip(BindingAction::ALL)
@@ -1861,6 +1931,17 @@ unsafe fn apply_options_form(window: Hwnd) {
         mouse_sensitivity_permille,
         invert_mouse_y: SendMessageW(form.invert_mouse_y_check, BM_GETCHECK, 0, 0) == BST_CHECKED,
         key_bindings: form.key_bindings,
+        sprint_behavior: if SendMessageW(form.sprint_toggle_check, BM_GETCHECK, 0, 0) == BST_CHECKED
+        {
+            HoldToggle::Toggle
+        } else {
+            HoldToggle::Hold
+        },
+        sneak_behavior: if SendMessageW(form.sneak_toggle_check, BM_GETCHECK, 0, 0) == BST_CHECKED {
+            HoldToggle::Toggle
+        } else {
+            HoldToggle::Hold
+        },
     };
     if let Err(error) = settings.validate() {
         let message = match error {
@@ -1891,6 +1972,10 @@ unsafe fn apply_options_form(window: Hwnd) {
     }
     if let Some(app) = APP.as_mut() {
         app.settings = settings;
+        app.input.clear();
+        app.sprint_toggled = false;
+        app.sneak_toggled = false;
+        app.jump_was_pressed = false;
         app.camera.fov_degrees = settings.field_of_view_degrees as f32;
         app.logger.event("INFO", "settings_saved", "scope=local");
     }
@@ -3322,6 +3407,8 @@ pub fn run(logger: Option<Logger>) {
             mining_catalog: MiningCatalog::prototype(),
             mining_session: MiningSession::default(),
             breaking_held: false,
+            sprint_toggled: false,
+            sneak_toggled: false,
             last_jump_press: None,
             jump_was_pressed: false,
             toggle_flight_pending: false,

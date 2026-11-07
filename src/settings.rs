@@ -8,9 +8,57 @@ use crate::world_store::{atomic_write, WorldStore};
 
 const MAGIC: &[u8; 8] = b"VOXSET01";
 const LEGACY_VERSION: u16 = 1;
-const FORMAT_VERSION: u16 = 2;
+const BINDINGS_VERSION: u16 = 2;
+const FORMAT_VERSION: u16 = 3;
 const LEGACY_ENCODED_LEN: usize = 19;
-const ENCODED_LEN: usize = 33;
+const BINDINGS_ENCODED_LEN: usize = 33;
+const ENCODED_LEN: usize = 35;
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum HoldToggle {
+    #[default]
+    Hold,
+    Toggle,
+}
+
+impl HoldToggle {
+    fn encoded(self) -> u8 {
+        match self {
+            Self::Hold => 0,
+            Self::Toggle => 1,
+        }
+    }
+
+    fn decode(value: u8) -> Option<Self> {
+        match value {
+            0 => Some(Self::Hold),
+            1 => Some(Self::Toggle),
+            _ => None,
+        }
+    }
+
+    pub fn active(self, held: bool, toggled: bool) -> bool {
+        match self {
+            Self::Hold => held,
+            Self::Toggle => toggled,
+        }
+    }
+
+    pub fn after_key_down(self, active: bool, initial_press: bool) -> bool {
+        match self {
+            Self::Hold => true,
+            Self::Toggle if initial_press => !active,
+            Self::Toggle => active,
+        }
+    }
+
+    pub fn after_key_up(self, active: bool) -> bool {
+        match self {
+            Self::Hold => false,
+            Self::Toggle => active,
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BindingAction {
@@ -140,6 +188,8 @@ pub struct Settings {
     pub mouse_sensitivity_permille: u16,
     pub invert_mouse_y: bool,
     pub key_bindings: KeyBindings,
+    pub sprint_behavior: HoldToggle,
+    pub sneak_behavior: HoldToggle,
 }
 
 impl Default for Settings {
@@ -149,6 +199,8 @@ impl Default for Settings {
             mouse_sensitivity_permille: 1000,
             invert_mouse_y: false,
             key_bindings: KeyBindings::default(),
+            sprint_behavior: HoldToggle::Hold,
+            sneak_behavior: HoldToggle::Hold,
         }
     }
 }
@@ -179,8 +231,10 @@ impl Settings {
             let offset = 15 + index * 2;
             bytes[offset..offset + 2].copy_from_slice(&self.key_bindings.key(action).to_le_bytes());
         }
-        let digest = checksum(&bytes[..29]);
-        bytes[29..33].copy_from_slice(&digest.to_le_bytes());
+        bytes[29] = self.sprint_behavior.encoded();
+        bytes[30] = self.sneak_behavior.encoded();
+        let digest = checksum(&bytes[..31]);
+        bytes[31..35].copy_from_slice(&digest.to_le_bytes());
         Ok(bytes)
     }
 
@@ -195,7 +249,8 @@ impl Settings {
         let version = u16::from_le_bytes([bytes[8], bytes[9]]);
         let (expected_len, checksum_offset) = match version {
             LEGACY_VERSION => (LEGACY_ENCODED_LEN, 15),
-            FORMAT_VERSION => (ENCODED_LEN, 29),
+            BINDINGS_VERSION => (BINDINGS_ENCODED_LEN, 29),
+            FORMAT_VERSION => (ENCODED_LEN, 31),
             _ => {
                 return SettingsLoad {
                     settings: Self::default(),
@@ -220,8 +275,8 @@ impl Settings {
 
         let defaults = Self::default();
         let mut warnings = Vec::new();
-        if version == LEGACY_VERSION {
-            warnings.push(SettingsWarning::MigratedVersion(LEGACY_VERSION));
+        if version < FORMAT_VERSION {
+            warnings.push(SettingsWarning::MigratedVersion(version));
         }
         let field_of_view_degrees = u16::from_le_bytes([bytes[10], bytes[11]]);
         let field_of_view_degrees = if (30..=110).contains(&field_of_view_degrees) {
@@ -262,12 +317,30 @@ impl Settings {
             }
             bindings
         };
+        let sprint_behavior = if version < FORMAT_VERSION {
+            HoldToggle::Hold
+        } else if let Some(value) = HoldToggle::decode(bytes[29]) {
+            value
+        } else {
+            warnings.push(SettingsWarning::InvalidSprintBehavior);
+            HoldToggle::Hold
+        };
+        let sneak_behavior = if version < FORMAT_VERSION {
+            HoldToggle::Hold
+        } else if let Some(value) = HoldToggle::decode(bytes[30]) {
+            value
+        } else {
+            warnings.push(SettingsWarning::InvalidSneakBehavior);
+            HoldToggle::Hold
+        };
         SettingsLoad {
             settings: Self {
                 field_of_view_degrees,
                 mouse_sensitivity_permille,
                 invert_mouse_y,
                 key_bindings,
+                sprint_behavior,
+                sneak_behavior,
             },
             warnings,
         }
@@ -295,6 +368,8 @@ pub enum SettingsWarning {
     InvalidMouseSensitivity,
     InvalidInvertMouseY,
     InvalidKeyBindings,
+    InvalidSprintBehavior,
+    InvalidSneakBehavior,
     MigratedVersion(u16),
 }
 
@@ -317,6 +392,12 @@ impl std::fmt::Display for SettingsWarning {
             }
             Self::InvalidKeyBindings => {
                 formatter.write_str("invalid or conflicting key bindings; defaults loaded")
+            }
+            Self::InvalidSprintBehavior => {
+                formatter.write_str("invalid sprint mode; hold mode loaded")
+            }
+            Self::InvalidSneakBehavior => {
+                formatter.write_str("invalid sneak mode; hold mode loaded")
             }
             Self::MigratedVersion(version) => {
                 write!(
@@ -405,8 +486,8 @@ mod tests {
     }
 
     fn refresh_checksum(bytes: &mut [u8; ENCODED_LEN]) {
-        let value = checksum(&bytes[..29]);
-        bytes[29..33].copy_from_slice(&value.to_le_bytes());
+        let value = checksum(&bytes[..31]);
+        bytes[31..35].copy_from_slice(&value.to_le_bytes());
     }
 
     fn legacy_v1_bytes(settings: Settings) -> [u8; LEGACY_ENCODED_LEN] {
@@ -418,6 +499,23 @@ mod tests {
         bytes[14] = u8::from(settings.invert_mouse_y);
         let digest = checksum(&bytes[..15]);
         bytes[15..19].copy_from_slice(&digest.to_le_bytes());
+        bytes
+    }
+
+    fn bindings_v2_bytes(settings: Settings) -> [u8; BINDINGS_ENCODED_LEN] {
+        let mut bytes = [0; BINDINGS_ENCODED_LEN];
+        bytes[..8].copy_from_slice(MAGIC);
+        bytes[8..10].copy_from_slice(&BINDINGS_VERSION.to_le_bytes());
+        bytes[10..12].copy_from_slice(&settings.field_of_view_degrees.to_le_bytes());
+        bytes[12..14].copy_from_slice(&settings.mouse_sensitivity_permille.to_le_bytes());
+        bytes[14] = u8::from(settings.invert_mouse_y);
+        for (index, action) in BindingAction::ALL.into_iter().enumerate() {
+            let offset = 15 + index * 2;
+            bytes[offset..offset + 2]
+                .copy_from_slice(&settings.key_bindings.key(action).to_le_bytes());
+        }
+        let digest = checksum(&bytes[..29]);
+        bytes[29..33].copy_from_slice(&digest.to_le_bytes());
         bytes
     }
 
@@ -468,6 +566,61 @@ mod tests {
     }
 
     #[test]
+    fn version_two_settings_migrate_with_hold_behaviors() {
+        let mut bindings = KeyBindings::default();
+        bindings.assign(BindingAction::Sprint, 0x46, false).unwrap();
+        let old = Settings {
+            field_of_view_degrees: 82,
+            mouse_sensitivity_permille: 700,
+            invert_mouse_y: true,
+            key_bindings: bindings,
+            sprint_behavior: HoldToggle::Toggle,
+            sneak_behavior: HoldToggle::Toggle,
+        };
+        let loaded = Settings::decode(&bindings_v2_bytes(old));
+        assert_eq!(loaded.settings.field_of_view_degrees, 82);
+        assert_eq!(loaded.settings.mouse_sensitivity_permille, 700);
+        assert!(loaded.settings.invert_mouse_y);
+        assert_eq!(loaded.settings.key_bindings, bindings);
+        assert_eq!(loaded.settings.sprint_behavior, HoldToggle::Hold);
+        assert_eq!(loaded.settings.sneak_behavior, HoldToggle::Hold);
+        assert_eq!(loaded.warnings, vec![SettingsWarning::MigratedVersion(2)]);
+    }
+
+    #[test]
+    fn hold_and_toggle_modes_apply_key_press_and_release_rules() {
+        assert!(HoldToggle::Hold.after_key_down(false, true));
+        assert!(!HoldToggle::Hold.after_key_up(true));
+        assert!(HoldToggle::Hold.active(true, false));
+        assert!(!HoldToggle::Toggle.after_key_down(false, false));
+        assert!(HoldToggle::Toggle.after_key_down(false, true));
+        assert!(HoldToggle::Toggle.after_key_down(true, false));
+        assert!(HoldToggle::Toggle.after_key_up(true));
+        assert!(HoldToggle::Toggle.active(false, true));
+        assert!(!HoldToggle::Toggle.after_key_down(true, true));
+    }
+
+    #[test]
+    fn invalid_toggle_modes_fall_back_individually() {
+        let mut bytes = Settings {
+            sprint_behavior: HoldToggle::Toggle,
+            sneak_behavior: HoldToggle::Toggle,
+            ..Settings::default()
+        }
+        .encode()
+        .unwrap();
+        bytes[29] = 9;
+        refresh_checksum(&mut bytes);
+        let loaded = Settings::decode(&bytes);
+        assert_eq!(loaded.settings.sprint_behavior, HoldToggle::Hold);
+        assert_eq!(loaded.settings.sneak_behavior, HoldToggle::Toggle);
+        assert_eq!(
+            loaded.warnings,
+            vec![SettingsWarning::InvalidSprintBehavior]
+        );
+    }
+
+    #[test]
     fn key_binding_conflicts_are_reported_and_shared_bindings_are_explicit() {
         let mut bindings = KeyBindings::default();
         assert_eq!(
@@ -515,10 +668,10 @@ mod tests {
             vec![SettingsWarning::CorruptFile]
         );
         let mut future = Settings::default().encode().unwrap();
-        future[8..10].copy_from_slice(&3u16.to_le_bytes());
+        future[8..10].copy_from_slice(&4u16.to_le_bytes());
         assert_eq!(
             Settings::decode(&future).warnings,
-            vec![SettingsWarning::UnsupportedVersion(3)]
+            vec![SettingsWarning::UnsupportedVersion(4)]
         );
     }
 
@@ -532,6 +685,7 @@ mod tests {
             mouse_sensitivity_permille: 750,
             invert_mouse_y: true,
             key_bindings: KeyBindings::default(),
+            ..Settings::default()
         };
         store.save(saved).unwrap();
         assert_eq!(store.load().unwrap().settings, saved);
