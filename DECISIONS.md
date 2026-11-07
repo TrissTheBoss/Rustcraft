@@ -54,6 +54,10 @@ The inventory domain owns stack limits, item identity, player slots, equipment c
 
 Player saves now encode 36 main slots, four armor slots, one offhand slot, item ID/variant/count, and selected hotbar index. The decoder enforces a fixed slot count, bounded stack counts, single-item armor slots, and a valid hotbar index. v1 and v2 saves migrate to empty inventory; their next save writes v3. Catalog-specific item identity/equipment validation must run when content definitions are available, and world-drop transactions are still separate work.
 
+## 2026-11-07 â€” Model block loot and dropped-item pickup independently
+
+The first drop subsystem uses a data-driven block-to-item table, stable IDs, bounded entity count, fixed-tick gravity/settling, pickup delay, partial inventory insertion, and bounded expiry. Its starter loot and timing values are prototype-only and are not claims about any Java Edition baseline. It is not yet called by the Windows interaction loop or included in world saves/rendering; those integrations must preserve drops through switching, restart, and backup recovery before this can satisfy the PRD.
+
 ## 2026-11-07 — Keep world management in the storage boundary
 
 World rename, copy, and delete operations belong to `WorldStore`, so UI actions share the same validation and save semantics. Rename preserves a prior snapshot, copies receive a new world ID while retaining source seed/mode/player/world data, and deletion validates the world directory before removing it. The prototype menu confirms deletion and disallows deleting the active world. Save and directory symlinks are rejected to prevent world operations from following paths outside the store.
