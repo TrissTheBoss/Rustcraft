@@ -53,7 +53,7 @@ The product should be usable as a standalone game with original default content.
 
 ### 4.3 Current state (orientation only)
 
-Repository documentation describes a Rust prototype with world/chunk storage, deterministic terrain, fixed-step simulation and collision foundations, movement, CPU rendering, a native Windows window path with basic save/create/open/copy/delete menu actions, a GPU presentation path in progress, and local-only texture extraction. The save format exists, but this is not a complete game loop, world editor, content catalog, settings system, multiplayer client, or compatibility implementation. See `README.md`, `DECISIONS.md`, and `ACTION_LOG.md` for the maintained implementation record; this PRD is the destination specification, not evidence that requirements are already met.
+Repository documentation describes a Rust prototype with world/chunk storage, deterministic terrain, fixed-step simulation and collision foundations, movement, CPU rendering, a native Windows window path with basic save/create/open/copy/delete/backup-restore menu actions, a GPU presentation path in progress, and local-only texture extraction. The save format exists, but this is not a complete game loop, world editor, content catalog, settings system, multiplayer client, or compatibility implementation. See `README.md`, `DECISIONS.md`, and `ACTION_LOG.md` for the maintained implementation record; this PRD is the destination specification, not evidence that requirements are already met.
 
 ## 5. Product experience and information architecture
 

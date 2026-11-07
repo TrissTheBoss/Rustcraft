@@ -55,6 +55,8 @@ const MENU_QUIT: usize = 1003;
 const MENU_WORLD_BASE: usize = 2000;
 const MENU_COPY_WORLD_BASE: usize = 3000;
 const MENU_DELETE_WORLD_BASE: usize = 4000;
+const MENU_RESTORE_BACKUP_BASE: usize = 5000;
+const MENU_RESTORE_BACKUP_CAPACITY: usize = 2500;
 const IDYES: i32 = 6;
 const MB_YESNO: u32 = 0x0004;
 const MB_ICONWARNING: u32 = 0x0030;
@@ -238,6 +240,7 @@ struct AppState {
     world_store: Option<WorldStore>,
     world_metadata: Option<WorldMetadata>,
     menu_world_ids: Vec<String>,
+    menu_restore_actions: Vec<(String, String)>,
     last_save: Instant,
 }
 
@@ -260,6 +263,18 @@ unsafe extern "system" fn window_proc(
     match message {
         WM_COMMAND => {
             let command = wparam & 0xffff;
+            if (MENU_RESTORE_BACKUP_BASE..MENU_RESTORE_BACKUP_BASE + MENU_RESTORE_BACKUP_CAPACITY)
+                .contains(&command)
+            {
+                let index = command - MENU_RESTORE_BACKUP_BASE;
+                if let Some((id, backup)) = APP
+                    .as_ref()
+                    .and_then(|app| app.menu_restore_actions.get(index).cloned())
+                {
+                    restore_backup_from_menu(window, &id, &backup);
+                }
+                return 0;
+            }
             if (MENU_DELETE_WORLD_BASE..MENU_DELETE_WORLD_BASE + 500).contains(&command) {
                 let index = command - MENU_DELETE_WORLD_BASE;
                 if let Some(id) = APP
@@ -695,6 +710,7 @@ unsafe fn build_main_menu(app: &mut AppState) -> *mut c_void {
     }
 
     app.menu_world_ids.clear();
+    app.menu_restore_actions.clear();
     let create_label = wide("Create New World...");
     AppendMenuW(
         worlds_menu,
@@ -720,6 +736,10 @@ unsafe fn build_main_menu(app: &mut AppState) -> *mut c_void {
                     if world_menu.is_null() {
                         continue;
                     }
+                    let restore_menu = CreatePopupMenu();
+                    if restore_menu.is_null() {
+                        continue;
+                    }
                     let can_open = summary.health == crate::world_store::WorldHealth::Ready;
                     let open = wide("Open");
                     let copy = wide("Copy");
@@ -741,6 +761,43 @@ unsafe fn build_main_menu(app: &mut AppState) -> *mut c_void {
                         MF_STRING,
                         MENU_DELETE_WORLD_BASE + index,
                         delete.as_ptr(),
+                    );
+                    AppendMenuW(world_menu, MF_SEPARATOR, 0, null());
+                    let mut backup_count = 0;
+                    match store.list_backups(&id) {
+                        Ok(backups) => {
+                            for backup in backups {
+                                if app.menu_restore_actions.len() >= MENU_RESTORE_BACKUP_CAPACITY {
+                                    break;
+                                }
+                                let action = app.menu_restore_actions.len();
+                                let label = wide(&backup);
+                                AppendMenuW(
+                                    restore_menu,
+                                    MF_STRING,
+                                    MENU_RESTORE_BACKUP_BASE + action,
+                                    label.as_ptr(),
+                                );
+                                app.menu_restore_actions.push((id.clone(), backup));
+                                backup_count += 1;
+                            }
+                        }
+                        Err(error) => app.logger.event(
+                            "ERROR",
+                            "world_backup_list_failed",
+                            format!("world={id} error={error}"),
+                        ),
+                    }
+                    if backup_count == 0 {
+                        let empty = wide("No backups available");
+                        AppendMenuW(restore_menu, MF_STRING | MF_GRAYED, 0, empty.as_ptr());
+                    }
+                    let restore = wide("Restore Backup");
+                    AppendMenuW(
+                        world_menu,
+                        MF_POPUP,
+                        restore_menu as usize,
+                        restore.as_ptr(),
                     );
                     let label = wide(&format!("{name}{health}"));
                     AppendMenuW(worlds_menu, MF_POPUP, world_menu as usize, label.as_ptr());
@@ -964,6 +1021,77 @@ unsafe fn delete_world_from_menu(window: Hwnd, id: &str) {
 }
 
 #[allow(static_mut_refs)]
+unsafe fn restore_backup_from_menu(window: Hwnd, id: &str, backup: &str) {
+    let Some((store, name)) = APP.as_ref().and_then(|app| {
+        let store = app.world_store.clone()?;
+        let name = store
+            .load(id)
+            .map(|world| world.metadata.name)
+            .unwrap_or_else(|_| id.to_owned());
+        Some((store, name))
+    }) else {
+        return;
+    };
+    let prompt = wide(&format!(
+        "Restore backup '{backup}' for '{name}'? The current world state will be preserved as a backup."
+    ));
+    let caption = wide("Restore World Backup");
+    if MessageBoxW(
+        window,
+        prompt.as_ptr(),
+        caption.as_ptr(),
+        MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2,
+    ) != IDYES
+    {
+        return;
+    }
+
+    let Some(app) = APP.as_mut() else {
+        return;
+    };
+    let active = app
+        .world_metadata
+        .as_ref()
+        .is_some_and(|metadata| metadata.id == id);
+    let restored = if active {
+        while let Some(breaking) = app.pending_block_actions.pop_front() {
+            if let Some(scene) = SCENE.as_mut() {
+                handle_block_action(app, scene, breaking);
+            }
+        }
+        let player = current_player_snapshot(app);
+        let Some(scene) = SCENE.as_ref() else {
+            return;
+        };
+        let Some(metadata) = app.world_metadata.as_mut() else {
+            return;
+        };
+        store.restore_backup_with_snapshot(id, backup, Some((metadata, &scene.world, player)))
+    } else {
+        store.restore_backup(id, backup)
+    };
+    match restored {
+        Ok(saved) => {
+            app.logger.event(
+                "INFO",
+                "world_backup_restored",
+                format!("world={id} backup={backup}"),
+            );
+            if active {
+                activate_world(window, app, saved);
+            } else {
+                install_main_menu(window, app);
+            }
+        }
+        Err(error) => app.logger.event(
+            "ERROR",
+            "world_backup_restore_failed",
+            format!("world={id} backup={backup} error={error}"),
+        ),
+    }
+}
+
+#[allow(static_mut_refs)]
 unsafe fn open_world_from_menu(window: Hwnd, app: &mut AppState, id: &str) {
     if app
         .world_metadata
@@ -1091,6 +1219,7 @@ pub fn run(logger: Option<Logger>) {
             world_store,
             world_metadata,
             menu_world_ids: Vec::new(),
+            menu_restore_actions: Vec::new(),
             last_save: Instant::now(),
             player,
         });
@@ -1423,18 +1552,8 @@ fn stored_game_mode(mode: GameMode) -> StoredGameMode {
     }
 }
 
-fn persist_world(app: &mut AppState, scene: &mut Scene) -> std::io::Result<()> {
-    let store = app.world_store.as_ref().ok_or_else(|| {
-        std::io::Error::new(std::io::ErrorKind::NotFound, "world storage is unavailable")
-    })?;
-    let metadata = app.world_metadata.as_mut().ok_or_else(|| {
-        std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            "world metadata is unavailable",
-        )
-    })?;
-    metadata.game_mode = stored_game_mode(app.player.mode);
-    let snapshot = PlayerSnapshot {
+fn current_player_snapshot(app: &AppState) -> PlayerSnapshot {
+    PlayerSnapshot {
         position: [
             app.player.transform.x,
             app.player.transform.y,
@@ -1446,7 +1565,22 @@ fn persist_world(app: &mut AppState, scene: &mut Scene) -> std::io::Result<()> {
         flying: app.player.flying,
         grounded: app.player.grounded,
         selected_block: app.selected_block,
-    };
+    }
+}
+
+fn persist_world(app: &mut AppState, scene: &mut Scene) -> std::io::Result<()> {
+    let snapshot = current_player_snapshot(app);
+    let game_mode = stored_game_mode(app.player.mode);
+    let store = app.world_store.as_ref().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::NotFound, "world storage is unavailable")
+    })?;
+    let metadata = app.world_metadata.as_mut().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "world metadata is unavailable",
+        )
+    })?;
+    metadata.game_mode = game_mode;
     store.save(metadata, &scene.world, snapshot)?;
     scene.dirty = false;
     app.last_save = Instant::now();

@@ -327,7 +327,11 @@ impl WorldStore {
             let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
                 continue;
             };
-            if valid_backup_name(&name) {
+            if valid_backup_name(&name)
+                && read_bounded(&entry.path())
+                    .ok()
+                    .is_some_and(|bytes| decode_save(&bytes, id).is_ok())
+            {
                 backups.push(name);
             }
         }
@@ -336,6 +340,15 @@ impl WorldStore {
     }
 
     pub fn restore_backup(&self, id: &str, backup_name: &str) -> io::Result<StoredWorld> {
+        self.restore_backup_with_snapshot(id, backup_name, None)
+    }
+
+    pub fn restore_backup_with_snapshot(
+        &self,
+        id: &str,
+        backup_name: &str,
+        current: Option<(&mut WorldMetadata, &World, PlayerSnapshot)>,
+    ) -> io::Result<StoredWorld> {
         let world_dir = self.ensure_world_dir(id)?;
         let backup_dir = world_dir.join(BACKUP_DIR);
         ensure_real_directory(&backup_dir)?;
@@ -344,10 +357,17 @@ impl WorldStore {
             .join(BACKUP_DIR)
             .join(validate_backup_name(backup_name)?);
         let bytes = read_bounded(&backup_path)?;
-        let restored = decode_save(&bytes, id)?;
+        let mut restored = decode_save(&bytes, id)?;
+        restored.metadata.updated_at = unix_seconds()?;
+        let mut world_bytes = Vec::new();
+        restored.world.save(&mut world_bytes)?;
+        let restored_bytes = encode_save(&restored.metadata, restored.player, &world_bytes)?;
         let current_path = self.save_path(id)?;
-        self.backup_current(id, &current_path)?;
-        atomic_write(&current_path, &bytes)?;
+        if let Some((metadata, world, player)) = current {
+            self.write_snapshot_preserving(metadata, world, player, true, Some(backup_name))?;
+        }
+        self.backup_current(id, &current_path, Some(backup_name))?;
+        atomic_write(&current_path, &restored_bytes)?;
         Ok(restored)
     }
 
@@ -389,6 +409,17 @@ impl WorldStore {
         player: PlayerSnapshot,
         backup: bool,
     ) -> io::Result<()> {
+        self.write_snapshot_preserving(metadata, world, player, backup, None)
+    }
+
+    fn write_snapshot_preserving(
+        &self,
+        metadata: &mut WorldMetadata,
+        world: &World,
+        player: PlayerSnapshot,
+        backup: bool,
+        preserved_backup: Option<&str>,
+    ) -> io::Result<()> {
         validate_player(player)?;
         self.ensure_world_dir(&metadata.id)?;
         let path = self.save_path(&metadata.id)?;
@@ -400,7 +431,7 @@ impl WorldStore {
         let bytes = encode_save(&next_metadata, player, &world_bytes)?;
         fs::create_dir_all(path.parent().expect("world save path has parent"))?;
         if backup && path.exists() {
-            self.backup_current(&next_metadata.id, &path)
+            self.backup_current(&next_metadata.id, &path, preserved_backup)
                 .map_err(|error| {
                     io::Error::new(
                         error.kind(),
@@ -418,7 +449,12 @@ impl WorldStore {
         Ok(())
     }
 
-    fn backup_current(&self, id: &str, save_path: &Path) -> io::Result<()> {
+    fn backup_current(
+        &self,
+        id: &str,
+        save_path: &Path,
+        preserved_backup: Option<&str>,
+    ) -> io::Result<()> {
         self.ensure_world_dir(id)?;
         let metadata = match fs::symlink_metadata(save_path) {
             Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => metadata,
@@ -436,7 +472,7 @@ impl WorldStore {
         let name = format!("backup-{}-{counter}.sav", unix_seconds()?);
         let backup = directory.join(name);
         atomic_copy(save_path, &backup)?;
-        prune_backups(&directory, MAX_BACKUPS)
+        prune_backups(&directory, MAX_BACKUPS, preserved_backup)
     }
 
     fn world_dir(&self, id: &str) -> io::Result<PathBuf> {
@@ -785,7 +821,7 @@ fn temporary_path(path: &Path) -> PathBuf {
     path.with_file_name(format!(".{name}.{}.{}.tmp", std::process::id(), counter))
 }
 
-fn prune_backups(directory: &Path, keep: usize) -> io::Result<()> {
+fn prune_backups(directory: &Path, keep: usize, preserved: Option<&str>) -> io::Result<()> {
     let mut entries = fs::read_dir(directory)?
         .filter_map(Result::ok)
         .filter_map(|entry| {
@@ -798,8 +834,14 @@ fn prune_backups(directory: &Path, keep: usize) -> io::Result<()> {
         })
         .collect::<Vec<_>>();
     entries.sort_by(|a, b| a.0.cmp(&b.0));
-    let remove_count = entries.len().saturating_sub(keep);
-    for (_, path) in entries.into_iter().take(remove_count) {
+    while entries.len() > keep {
+        let Some(index) = entries
+            .iter()
+            .position(|(name, _)| Some(name.as_str()) != preserved)
+        else {
+            break;
+        };
+        let (_, path) = entries.remove(index);
         fs::remove_file(path)?;
     }
     Ok(())
@@ -978,6 +1020,17 @@ mod tests {
         let backups = store.list_backups(&saved.metadata.id).unwrap();
         assert_eq!(backups.len(), 1);
 
+        let backup_dir = store
+            .world_dir(&saved.metadata.id)
+            .unwrap()
+            .join(BACKUP_DIR);
+        let invalid_backup = "backup-9999999999-999.sav";
+        fs::write(backup_dir.join(invalid_backup), b"corrupt backup").unwrap();
+        assert_eq!(store.list_backups(&saved.metadata.id).unwrap(), backups);
+        assert!(store
+            .restore_backup(&saved.metadata.id, invalid_backup)
+            .is_err());
+
         let restored = store
             .restore_backup(&saved.metadata.id, &backups[0])
             .unwrap();
@@ -993,6 +1046,78 @@ mod tests {
         assert!(store
             .restore_backup(&saved.metadata.id, "..\\outside.sav")
             .is_err());
+    }
+
+    #[test]
+    fn restoring_backup_preserves_selected_snapshot_and_dirty_current_world() {
+        let root = TestRoot::new();
+        let store = WorldStore::new(&root.0);
+        let mut saved = store
+            .create(
+                "Recovery World",
+                11,
+                StoredGameMode::Creative,
+                test_world(),
+                PlayerSnapshot::default(),
+            )
+            .unwrap();
+        for block in 1..=6 {
+            saved.world.set_block([-1, 1, 32], BlockId(block));
+            store
+                .save(&mut saved.metadata, &saved.world, saved.player)
+                .unwrap();
+        }
+        let backups = store.list_backups(&saved.metadata.id).unwrap();
+        assert_eq!(backups.len(), MAX_BACKUPS);
+        let selected_backup = backups[0].clone();
+        let selected_bytes = read_bounded(
+            &store
+                .world_dir(&saved.metadata.id)
+                .unwrap()
+                .join(BACKUP_DIR)
+                .join(&selected_backup),
+        )
+        .unwrap();
+        let expected = decode_save(&selected_bytes, &saved.metadata.id).unwrap();
+
+        let dirty_marker = [-1, 2, 32];
+        saved.world.set_block(dirty_marker, BlockId(3));
+        saved.player.position = [4.0, 12.0, 5.0];
+        let world_id = saved.metadata.id.clone();
+        let restored = store
+            .restore_backup_with_snapshot(
+                &world_id,
+                &selected_backup,
+                Some((&mut saved.metadata, &saved.world, saved.player)),
+            )
+            .unwrap();
+
+        assert_eq!(restored.world, expected.world);
+        assert_eq!(restored.player, expected.player);
+        assert!(store
+            .list_backups(&saved.metadata.id)
+            .unwrap()
+            .contains(&selected_backup));
+        let retained_dirty_snapshot = store
+            .list_backups(&saved.metadata.id)
+            .unwrap()
+            .into_iter()
+            .filter_map(|name| {
+                let path = store
+                    .world_dir(&saved.metadata.id)
+                    .ok()?
+                    .join(BACKUP_DIR)
+                    .join(name);
+                read_bounded(&path)
+                    .ok()
+                    .and_then(|bytes| decode_save(&bytes, &saved.metadata.id).ok())
+            })
+            .any(|snapshot| {
+                snapshot.world.block_at(dirty_marker) == Some(BlockId(3))
+                    && snapshot.player.position == [4.0, 12.0, 5.0]
+            });
+        assert!(retained_dirty_snapshot);
+        assert_eq!(store.load(&saved.metadata.id).unwrap(), restored);
     }
 
     #[test]
