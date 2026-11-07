@@ -19,7 +19,8 @@ const SAVE_MAGIC_V6: &[u8; 8] = b"VXSAVE06";
 const SAVE_MAGIC_V7: &[u8; 8] = b"VXSAVE07";
 const SAVE_MAGIC_V8: &[u8; 8] = b"VXSAVE08";
 const SAVE_MAGIC_V9: &[u8; 8] = b"VXSAVE09";
-const SAVE_VERSION: u32 = 9;
+const SAVE_MAGIC_V10: &[u8; 8] = b"VXSAVE10";
+const SAVE_VERSION: u32 = 10;
 const SAVE_FILE: &str = "world.vxs";
 const BACKUP_DIR: &str = "backups";
 const MAX_NAME_BYTES: usize = 128;
@@ -108,6 +109,7 @@ pub struct PlayerSnapshot {
     pub fall_distance: f64,
     pub fall_damage_armed: bool,
     pub food: crate::survival::FoodState,
+    pub hunger_clock: crate::survival::HungerClock,
     pub selected_block: BlockId,
     pub inventory: Inventory,
     pub drops: ItemDrops,
@@ -126,6 +128,7 @@ impl Default for PlayerSnapshot {
             fall_distance: 0.0,
             fall_damage_armed: false,
             food: crate::survival::FoodState::default(),
+            hunger_clock: crate::survival::HungerClock::default(),
             selected_block: BlockId(1),
             inventory: Inventory::default(),
             drops: ItemDrops::default(),
@@ -903,7 +906,7 @@ fn encode_save(
     let world_len = u64::try_from(world_bytes.len())
         .map_err(|_| invalid_input("world payload length is invalid"))?;
     let mut output = Vec::with_capacity(world_bytes.len() + 96 + name.len());
-    output.write_all(SAVE_MAGIC_V9)?;
+    output.write_all(SAVE_MAGIC_V10)?;
     output.write_all(&SAVE_VERSION.to_le_bytes())?;
     output.write_all(&name_len.to_le_bytes())?;
     output.write_all(name)?;
@@ -935,6 +938,9 @@ fn encode_save(
         (player.food.exhaustion_milli() & 0xff) as u8,
         (player.food.exhaustion_milli() >> 8) as u8,
     ])?;
+    let (phase, ticks) = player.hunger_clock.saved();
+    output.write_all(&[phase])?;
+    output.write_all(&ticks.to_le_bytes())?;
     output.write_all(&world_len.to_le_bytes())?;
     output.write_all(world_bytes)?;
     output.write_all(&checksum64(&output).to_le_bytes())?;
@@ -986,6 +992,11 @@ fn decode_save(bytes: &[u8], id: &str) -> io::Result<StoredWorld> {
         player.food =
             crate::survival::FoodState::from_saved(food_level, saturation_milli, exhaustion_milli)
                 .ok_or_else(|| invalid_data("invalid saved hunger state"))?;
+    }
+    if version >= 10 {
+        player.hunger_clock =
+            crate::survival::HungerClock::from_saved(read_byte(&mut input)?, read_u16(&mut input)?)
+                .ok_or_else(|| invalid_data("invalid saved hunger clock"))?;
     }
     validate_player(&player).map_err(|_| invalid_data("invalid player snapshot values"))?;
     let world_len = read_u64(&mut input)?;
@@ -1042,6 +1053,7 @@ fn read_metadata<R: Read>(input: &mut R, id: &str) -> io::Result<(WorldMetadata,
         7 => &magic == SAVE_MAGIC_V7,
         8 => &magic == SAVE_MAGIC_V8,
         9 => &magic == SAVE_MAGIC_V9,
+        10 => &magic == SAVE_MAGIC_V10,
         _ => false,
     };
     if !version_matches_magic {
@@ -1537,7 +1549,7 @@ mod tests {
             .windows(8)
             .position(|window| window == b"VOXEL04\0")
             .expect("encoded world payload is present");
-        bytes.drain(world_start - 13..world_start - 8);
+        bytes.drain(world_start - 16..world_start - 8);
         refresh_fixture_checksum(bytes);
     }
 
@@ -1589,6 +1601,104 @@ mod tests {
     }
 
     #[test]
+    fn hunger_intervals_resume_on_the_next_tick_after_reload() {
+        use crate::survival::{FoodState, HungerClock, HungerDifficulty as D, PlayerVitals};
+        for (phase, ticks, difficulty, food_level, health) in [
+            (2, 79, D::Normal, 18, 10),
+            (5, 79, D::Hard, 0, 1),
+            (1, 19, D::Peaceful, 10, 10),
+        ] {
+            let root = TestRoot::new();
+            let store = WorldStore::new(&root.0);
+            let player = PlayerSnapshot {
+                health,
+                food: FoodState::from_saved(food_level, 0, 0).unwrap(),
+                hunger_clock: HungerClock::from_saved(phase, ticks).unwrap(),
+                ..PlayerSnapshot::default()
+            };
+            let saved = store
+                .create(
+                    "Hunger timer",
+                    17,
+                    StoredGameMode::Survival,
+                    test_world(),
+                    player,
+                )
+                .unwrap();
+            let mut loaded = store.load(&saved.metadata.id).unwrap().player;
+            let mut vitals = PlayerVitals::from_saved_health(loaded.health).unwrap();
+            let outcome = loaded
+                .hunger_clock
+                .tick(&mut loaded.food, &mut vitals, difficulty);
+            assert_eq!(vitals.health(), if phase == 5 { 0 } else { 11 });
+            assert_eq!(outcome.became_dead, phase == 5);
+        }
+    }
+
+    #[test]
+    fn version_nine_migrates_food_without_inventing_timer_progress() {
+        let root = TestRoot::new();
+        let store = WorldStore::new(&root.0);
+        let player = PlayerSnapshot {
+            food: crate::survival::FoodState::from_saved(13, 4000, 700).unwrap(),
+            ..PlayerSnapshot::default()
+        };
+        let saved = store
+            .create(
+                "Legacy nine",
+                18,
+                StoredGameMode::Survival,
+                test_world(),
+                player.clone(),
+            )
+            .unwrap();
+        let path = store.save_path(&saved.metadata.id).unwrap();
+        let mut bytes = read_bounded(&path).unwrap();
+        let world_start = bytes
+            .windows(8)
+            .position(|window| window == b"VOXEL04\0")
+            .unwrap();
+        bytes.drain(world_start - 11..world_start - 8);
+        bytes[..8].copy_from_slice(SAVE_MAGIC_V9);
+        bytes[8..12].copy_from_slice(&9u32.to_le_bytes());
+        refresh_fixture_checksum(&mut bytes);
+        atomic_write(&path, &bytes).unwrap();
+        let loaded = store.load(&saved.metadata.id).unwrap();
+        assert_eq!(loaded.player.food, player.food);
+        assert_eq!(
+            loaded.player.hunger_clock,
+            crate::survival::HungerClock::default()
+        );
+    }
+
+    #[test]
+    fn invalid_hunger_clock_is_rejected_even_with_valid_checksum() {
+        let root = TestRoot::new();
+        let store = WorldStore::new(&root.0);
+        let saved = store
+            .create(
+                "Bad clock",
+                19,
+                StoredGameMode::Survival,
+                test_world(),
+                PlayerSnapshot::default(),
+            )
+            .unwrap();
+        let original = read_bounded(&store.save_path(&saved.metadata.id).unwrap()).unwrap();
+        let world_start = original
+            .windows(8)
+            .position(|window| window == b"VOXEL04\0")
+            .unwrap();
+        for (phase, ticks) in [(6, 0u16), (0, 1), (1, 20), (2, 80), (5, u16::MAX)] {
+            let mut bytes = original.clone();
+            bytes[world_start - 11] = phase;
+            bytes[world_start - 10..world_start - 8].copy_from_slice(&ticks.to_le_bytes());
+            refresh_fixture_checksum(&mut bytes);
+            assert!(decode_save(&bytes, &saved.metadata.id).is_err());
+        }
+    }
+
+    #[test]
     fn create_save_load_round_trips_world_and_player_state() {
         let root = TestRoot::new();
         let store = WorldStore::new(&root.0);
@@ -1627,6 +1737,7 @@ mod tests {
             fall_distance: 4.5,
             fall_damage_armed: true,
             food: crate::survival::FoodState::from_saved(13, 6_500, 2_250).unwrap(),
+            hunger_clock: crate::survival::HungerClock::default(),
             selected_block: BlockId(3),
             inventory,
             drops,
@@ -1817,13 +1928,13 @@ mod tests {
             .unwrap();
 
         let upgraded = read_bounded(&save_path).unwrap();
-        assert_eq!(&upgraded[..8], SAVE_MAGIC_V9);
-        assert_eq!(u32::from_le_bytes(upgraded[8..12].try_into().unwrap()), 9);
+        assert_eq!(&upgraded[..8], SAVE_MAGIC_V10);
+        assert_eq!(u32::from_le_bytes(upgraded[8..12].try_into().unwrap()), 10);
         assert_eq!(store.load(&created.metadata.id).unwrap(), loaded);
     }
 
     #[test]
-    fn version_two_worlds_load_with_empty_player_items_and_upgrade_to_version_nine() {
+    fn version_two_worlds_load_with_empty_player_items_and_upgrade_to_version_ten() {
         let root = TestRoot::new();
         let store = WorldStore::new(&root.0);
         let created = store
@@ -1849,8 +1960,8 @@ mod tests {
             .unwrap();
 
         let upgraded = read_bounded(&save_path).unwrap();
-        assert_eq!(&upgraded[..8], SAVE_MAGIC_V9);
-        assert_eq!(u32::from_le_bytes(upgraded[8..12].try_into().unwrap()), 9);
+        assert_eq!(&upgraded[..8], SAVE_MAGIC_V10);
+        assert_eq!(u32::from_le_bytes(upgraded[8..12].try_into().unwrap()), 10);
         assert_eq!(store.load(&created.metadata.id).unwrap(), loaded);
     }
 
@@ -1892,7 +2003,7 @@ mod tests {
             .save(&mut loaded.metadata, &loaded.world, loaded.player.clone())
             .unwrap();
         let upgraded = read_bounded(&save_path).unwrap();
-        assert_eq!(&upgraded[..8], SAVE_MAGIC_V9);
+        assert_eq!(&upgraded[..8], SAVE_MAGIC_V10);
         assert_eq!(store.load(&created.metadata.id).unwrap(), loaded);
     }
 
@@ -1946,12 +2057,12 @@ mod tests {
             .unwrap();
 
         let upgraded = read_bounded(&save_path).unwrap();
-        assert_eq!(&upgraded[..8], SAVE_MAGIC_V9);
+        assert_eq!(&upgraded[..8], SAVE_MAGIC_V10);
         assert_eq!(store.load(&created.metadata.id).unwrap(), loaded);
     }
 
     #[test]
-    fn version_six_worlds_receive_default_survival_state_and_upgrade_to_nine() {
+    fn version_six_worlds_receive_default_survival_state_and_upgrade_to_ten() {
         let root = TestRoot::new();
         let store = WorldStore::new(&root.0);
         let created = store
@@ -1977,7 +2088,7 @@ mod tests {
             .save(&mut loaded.metadata, &loaded.world, loaded.player.clone())
             .unwrap();
         let upgraded = read_bounded(&path).unwrap();
-        assert_eq!(&upgraded[..8], SAVE_MAGIC_V9);
+        assert_eq!(&upgraded[..8], SAVE_MAGIC_V10);
         assert_eq!(store.load(&created.metadata.id).unwrap(), loaded);
     }
 
@@ -2006,7 +2117,7 @@ mod tests {
             .save(&mut loaded.metadata, &loaded.world, loaded.player.clone())
             .unwrap();
         let upgraded = read_bounded(&path).unwrap();
-        assert_eq!(&upgraded[..8], SAVE_MAGIC_V9);
+        assert_eq!(&upgraded[..8], SAVE_MAGIC_V10);
         assert_eq!(store.load(&created.metadata.id).unwrap(), loaded);
     }
 
@@ -2037,7 +2148,7 @@ mod tests {
         store
             .save(&mut loaded.metadata, &loaded.world, loaded.player.clone())
             .unwrap();
-        assert_eq!(&read_bounded(&path).unwrap()[..8], SAVE_MAGIC_V9);
+        assert_eq!(&read_bounded(&path).unwrap()[..8], SAVE_MAGIC_V10);
     }
 
     #[test]
@@ -2673,7 +2784,7 @@ mod tests {
             .windows(world_bytes.len())
             .position(|window| window == world_bytes)
             .unwrap();
-        bytes[world_start - 13] = crate::survival::MAX_FOOD_LEVEL + 1;
+        bytes[world_start - 16] = crate::survival::MAX_FOOD_LEVEL + 1;
         refresh_fixture_checksum(&mut bytes);
         assert_eq!(
             decode_save(&bytes, &saved.metadata.id).unwrap_err().kind(),

@@ -20,13 +20,31 @@ pub enum HungerDifficulty {
 
 /// Provisional slow regeneration/starvation clock. Fast saturation-driven
 /// fractional healing remains a separate conformance requirement.
-#[derive(Default)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct HungerClock {
     phase: u8,
     ticks: u16,
 }
 
 impl HungerClock {
+    pub const fn from_saved(phase: u8, ticks: u16) -> Option<Self> {
+        let valid = match phase {
+            0 => ticks == 0,
+            1 => ticks < 20,
+            2..=5 => ticks < 80,
+            _ => false,
+        };
+        if valid {
+            Some(Self { phase, ticks })
+        } else {
+            None
+        }
+    }
+
+    pub const fn saved(self) -> (u8, u16) {
+        (self.phase, self.ticks)
+    }
+
     pub fn tick(
         &mut self,
         food: &mut FoodState,

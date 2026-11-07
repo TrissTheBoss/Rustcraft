@@ -856,7 +856,7 @@ unsafe extern "system" fn window_proc(
                                     }
                                 }
                             }
-                            let before_hunger = (app.food, app.vitals);
+                            let before_hunger = (app.food, app.vitals, app.hunger_clock);
                             let hunger_death = if uses_hunger {
                                 app.hunger_clock
                                     .tick(&mut app.food, &mut app.vitals, difficulty)
@@ -865,7 +865,7 @@ unsafe extern "system" fn window_proc(
                                 app.hunger_clock = crate::survival::HungerClock::default();
                                 false
                             };
-                            if before_hunger != (app.food, app.vitals) {
+                            if before_hunger != (app.food, app.vitals, app.hunger_clock) {
                                 if let Some(scene) = SCENE.as_mut() {
                                     scene.dirty = true;
                                 }
@@ -2775,7 +2775,9 @@ unsafe fn handle_death_command(window: Hwnd, command: usize) -> bool {
 
 #[allow(static_mut_refs)]
 unsafe fn respawn_player(window: Hwnd) {
-    let previous_player = APP.as_ref().map(|app| (app.player, app.vitals, app.food));
+    let previous_player = APP
+        .as_ref()
+        .map(|app| (app.player, app.vitals, app.food, app.hunger_clock));
     let previous_scene_dirty = SCENE.as_ref().is_some_and(|scene| scene.dirty);
     let result = (|| {
         let (Some(app), Some(scene)) = (APP.as_mut(), SCENE.as_mut()) else {
@@ -2811,10 +2813,13 @@ unsafe fn respawn_player(window: Hwnd) {
         persist_world(app, scene).map_err(|error| error.to_string())
     })();
     if let Err(error) = result {
-        if let (Some((player, vitals, food)), Some(app)) = (previous_player, APP.as_mut()) {
+        if let (Some((player, vitals, food, hunger_clock)), Some(app)) =
+            (previous_player, APP.as_mut())
+        {
             app.player = player;
             app.vitals = vitals;
             app.food = food;
+            app.hunger_clock = hunger_clock;
         }
         if let Some(scene) = SCENE.as_mut() {
             scene.dirty = previous_scene_dirty;
@@ -4781,7 +4786,7 @@ unsafe fn activate_world(window: Hwnd, app: &mut AppState, saved: crate::world_s
     app.player = player_controller(&saved.player, saved.metadata.game_mode);
     app.vitals = PlayerVitals::from_saved_health(saved.player.health).unwrap_or_default();
     app.food = saved.player.food;
-    app.hunger_clock = crate::survival::HungerClock::default();
+    app.hunger_clock = saved.player.hunger_clock;
     app.activity_exhaustion = crate::survival::ActivityExhaustion::default();
     app.death_items_retained = false;
     app.selected_block = saved.player.selected_block;
@@ -5028,7 +5033,7 @@ pub fn run(logger: Option<Logger>) {
             vitals: PlayerVitals::from_saved_health(initial_player.health).unwrap_or_default(),
             food: initial_player.food,
             activity_exhaustion: crate::survival::ActivityExhaustion::default(),
-            hunger_clock: crate::survival::HungerClock::default(),
+            hunger_clock: initial_player.hunger_clock,
         });
         if let Some(app) = APP.as_ref() {
             app.logger.event(
@@ -5653,6 +5658,7 @@ fn current_player_snapshot(app: &AppState) -> PlayerSnapshot {
         fall_distance: app.player.fall_distance,
         fall_damage_armed: app.player.fall_damage_armed,
         food: app.food,
+        hunger_clock: app.hunger_clock,
     }
 }
 
